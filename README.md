@@ -219,6 +219,13 @@ What it enforces, per node:
 | `DbLookupExtensions.Enabled` | `true` | tx/block lookup by hash |
 | systemd `-log-level` | `*:INFO` | DEBUG dumps full SC payloads — 382 KB per 40 lines |
 | systemd `-operation-mode` | *removed* | see §2 |
+| `prefs.toml` → `NodeDisplayName` | `$NODE_DISPLAY_NAME` | **upgrades silently erase it** — `node_name()` is called only from the *install* paths, never from `upgrade_squad`, while `update()` overwrites `prefs.toml`. Without this your nodes go unnamed on the explorer |
+
+Set the display name once and it is remembered in `~/.mvx-deephistory.conf`:
+
+```bash
+NODE_DISPLAY_NAME=foxsy ~/mvx-deephistory-apply.sh
+```
 
 It is idempotent and fails loudly if upstream renames a key.
 
@@ -351,6 +358,13 @@ window starts rolling):
 
 ### Housekeeping
 
-- **Rotate the GitHub PAT** in `mx-chain-scripts/config/variables.cfg` — stored in plaintext.
-- Helper scripts on the host: `~/mvx-deephistory-apply.sh`, `~/phase2-when-ready.sh`.
-- Backups: `/root/elrond-unit-backups-*`, per-node `config/config.toml.bak-*`.
+- **`GITHUBTOKEN` in `variables.cfg` is optional — leave it empty.** Every repo the scripts
+  touch (`mx-chain-scripts`, `mx-chain-go`, `mx-chain-*-config`) is public. The token only
+  raises the GitHub API limit from 60 to 5000 requests/hour. Without it an install can stall
+  with "API limit reached" on a busy or NATed IP — wait an hour and retry. That is a better
+  trade than a plaintext credential sitting on disk.
+- Helper script: `~/mvx-deephistory-apply.sh`. Settings persist in `~/.mvx-deephistory.conf`
+  (retention, trie deadline, display name), so post-upgrade runs need no arguments.
+- Backups the tooling leaves behind: `/root/elrond-unit-backups-*`, per-node
+  `config/config.toml.bak-*` and `config/prefs.toml.bak-*`. Safe to delete once verified.
+  If you ever back up `variables.cfg` while it still holds a token, delete that copy too.

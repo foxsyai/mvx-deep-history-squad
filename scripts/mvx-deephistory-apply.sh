@@ -23,12 +23,30 @@
 #
 #  Usage:  ./mvx-deephistory-apply.sh [--restart]
 #  Env:    NUM_EPOCHS_TO_KEEP (default 62)   TRIE_DEADLINE_MS (default 100000)
+#          NODE_DISPLAY_NAME (explorer name; lost on every upgrade)
+#  Settings are remembered in ~/.mvx-deephistory.conf after the first run, so a
+#  post-upgrade invocation needs no arguments.
 # =============================================================================
 set -uo pipefail
 
 NODES="${NODES:-0 1 2 3}"
+
+# Persisted per-host settings. Retention depends on the disk (see README §5) and the
+# explorer display name is wiped by every upgrade, so both are remembered here rather
+# than retyped. Precedence: environment variable > this file > built-in default.
+CONF="${MVX_DH_CONF:-$HOME/.mvx-deephistory.conf}"
+if [ -f "$CONF" ]; then
+  _e_keep="${NUM_EPOCHS_TO_KEEP:-}"; _e_trie="${TRIE_DEADLINE_MS:-}"; _e_name="${NODE_DISPLAY_NAME:-}"
+  # shellcheck disable=SC1090
+  . "$CONF"
+  [ -n "$_e_keep" ] && NUM_EPOCHS_TO_KEEP="$_e_keep"
+  [ -n "$_e_trie" ] && TRIE_DEADLINE_MS="$_e_trie"
+  [ -n "$_e_name" ] && NODE_DISPLAY_NAME="$_e_name"
+fi
+
 NUM_EPOCHS_TO_KEEP="${NUM_EPOCHS_TO_KEEP:-62}"
 TRIE_DEADLINE_MS="${TRIE_DEADLINE_MS:-100000}"
+NODE_DISPLAY_NAME="${NODE_DISPLAY_NAME:-}"
 NODES_ROOT="${NODES_ROOT:-$HOME/elrond-nodes}"
 SCRIPTS_CFG="${SCRIPTS_CFG:-$HOME/mx-chain-scripts/config/variables.cfg}"
 RESTART=0
@@ -56,6 +74,7 @@ set_kv() {
 echo "=============================================================="
 echo " Deep-history squad: re-applying customizations"
 echo " retention: ${NUM_EPOCHS_TO_KEEP} epochs   trie deadline: ${TRIE_DEADLINE_MS} ms"
+echo " display name: ${NODE_DISPLAY_NAME:-<unset>}   config: ${CONF}"
 echo "=============================================================="
 
 # Warn if nodes are already up: edits to config.toml are read only at startup, so a
@@ -112,7 +131,31 @@ for n in $NODES; do
   else
     bad "[DbLookupExtensions] section not found"
   fi
+
+  # --- prefs.toml: explorer display name ------------------------------------
+  # upgrade_squad never calls node_name(), and update() overwrites prefs.toml, so the
+  # display name is lost on every upgrade unless re-applied here.
+  PREFS="$NODES_ROOT/node-$n/config/prefs.toml"
+  if [ -n "$NODE_DISPLAY_NAME" ]; then
+    if [ -f "$PREFS" ]; then
+      cp -f "$PREFS" "$PREFS.bak-$(date +%Y%m%d-%H%M%S)"
+      set_kv "$PREFS" "NodeDisplayName" "\"$NODE_DISPLAY_NAME\""
+    else
+      bad "missing $PREFS"
+    fi
+  else
+    warn "NODE_DISPLAY_NAME unset — leaving prefs.toml alone."
+    warn "     Set it once and it is remembered: NODE_DISPLAY_NAME=foxsy $0"
+  fi
 done
+
+# Remember the settings for next time (after an upgrade wipes the node configs).
+cat > "$CONF" <<EOF
+# Written by mvx-deephistory-apply.sh — per-host settings, survives node upgrades.
+NUM_EPOCHS_TO_KEEP="$NUM_EPOCHS_TO_KEEP"
+TRIE_DEADLINE_MS="$TRIE_DEADLINE_MS"
+NODE_DISPLAY_NAME="$NODE_DISPLAY_NAME"
+EOF
 
 # --- systemd units -----------------------------------------------------------
 # The install writes these with *:DEBUG and appends $NODE_EXTRA_FLAGS. We want
