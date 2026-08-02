@@ -3,9 +3,13 @@
 Working notes for the mainnet deep-history squad. Written so a rebuild — here or on
 another machine — is a straight line instead of a re-investigation.
 
-**Repo:** `github.com/foxsyai/mvx-deep-history-squad` (private)
-**Built:** 1 August 2026 (epoch 2192 → 2193)
-**Host:** `sebastian@192.168.69.104` (NUC10i7FNH · 31 GB RAM · 12 threads · 3.6 TB NVMe)
+**Repo:** `github.com/foxsyai/mvx-deep-history-squad`
+**First built:** 1 August 2026 (mainnet epoch 2192 → 2193)
+**Reference hardware:** Intel NUC-class box · 31 GB RAM · 12 threads · 3.6 TB NVMe
+
+> Paths below assume the stock layout the install scripts create: nodes under
+> `$HOME/elrond-nodes`, scripts under `$HOME/mx-chain-scripts`. Substitute your own
+> user/host throughout.
 
 ---
 
@@ -73,7 +77,7 @@ Two consequences, both bad for us:
 1. **Unbounded growth.** `NumEpochsToKeep` is dead — both cleanup flags are forced off.
    Storage grows forever (MultiversX quote 7.5 TB for genesis→2024).
 2. **`StartInEpochEnabled = false` means a fresh node replays from GENESIS.** Measured on
-   this host: ~2,200 rounds in 24 minutes against a chain at round 31.5M — about
+   the reference hardware: ~2,200 rounds in 24 minutes against a chain at round 31.5M — about
    **239 days**. This is the trap that cost the most time during the build.
 
 Without the flag, fast bootstrap works normally and a fresh node is synced in under an hour.
@@ -107,8 +111,7 @@ sed -i 's|^NODE_EXTRA_FLAGS=.*|NODE_EXTRA_FLAGS=""|'     config/variables.cfg   
 ./script.sh observing_squad
 
 # ---- 5. apply our customizations BEFORE first start (see §4 for why) ----
-#    Private repo — authenticate first, once, on the new box:
-#      sudo apt install -y gh && gh auth login        (or use a PAT / deploy key)
+#    Public repo — no credentials needed
 git clone https://github.com/foxsyai/mvx-deep-history-squad.git ~/mvx-deep-history
 cp ~/mvx-deep-history/scripts/mvx-deephistory-apply.sh ~/
 chmod +x ~/mvx-deephistory-apply.sh
