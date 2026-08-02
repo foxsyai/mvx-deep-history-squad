@@ -182,11 +182,28 @@ historical-balances edge case in §7 and is unused in the current setup.
 
 Customizations do not survive upgrades, because:
 
-| Action | What it destroys |
+What an upgrade actually does to your customizations:
+
+| Item | Survives an upgrade? | Mechanism |
+|---|---|---|
+| `prefs.toml` — `NodeDisplayName`, `DestinationShardAsObserver`, `Identity` | ✅ **yes** | `upgrade` and `upgrade_squad` both copy it to `prefs.toml.save` before `update()` and `mv` it back after |
+| `DbLookupExtensions.Enabled` | ✅ yes (`upgrade_squad` only) | explicit `sed` re-enabling it after `update()` |
+| six `variables.cfg` fields incl. `NODE_EXTRA_FLAGS` | ✅ yes | `variables_backup` → `git reset --hard` → `variables_restore` |
+| systemd units (log level, flags) | ✅ yes | upgrades never call `systemd()`; only a fresh install regenerates them |
+| **`NumEpochsToKeep`** | ❌ **no** → back to `4` | `update()` overwrites `config.toml` wholesale |
+| **`TrieOperationsDeadlineMilliseconds`** | ❌ no → back to `10000` | ditto |
+| **`ObserverCleanOldEpochsData`** | ❌ no → back to `false` | ditto |
+| **`AccountsTrieCleanOldEpochsData`** | ❌ no → back to `true` | ditto |
+| **`AccountsTrieSkipRemovalCustomPattern`** | ❌ no → back to `"%50"` | ditto |
+
+So the apply script exists for **`config.toml` only**. Everything else the scripts already
+handle. The dangerous one is `NumEpochsToKeep` reverting to `4` — see the warning above.
+
+| Action | What it resets |
 |---|---|
-| `script.sh upgrade` / `upgrade_squad` | `cp -r <config-repo>/* $WORKDIR/config` — overwrites **all** of `config/`, including `config.toml` **and `prefs.toml`** |
-| `script.sh github_pull` (option 14) | `git reset --hard HEAD` — discards every local edit to `mx-chain-scripts`, **except** the six `variables.cfg` fields below, which are saved and restored around the reset |
-| `script.sh observing_squad` | regenerates systemd units from `functions.cfg` |
+| `script.sh upgrade` / `upgrade_squad` | all of `config/` via `cp -r <config-repo>/*`, then restores `prefs.toml` from its own backup |
+| `script.sh github_pull` (option 14) | `git reset --hard HEAD` — discards every local edit to `mx-chain-scripts`, **except** the six `variables.cfg` fields, saved and restored around the reset |
+| `script.sh observing_squad` | regenerates systemd units from `functions.cfg` (so re-apply log level after a *reinstall*, not after an upgrade) |
 
 Consequences worth internalising:
 
@@ -219,9 +236,10 @@ What it enforces, per node:
 | `DbLookupExtensions.Enabled` | `true` | tx/block lookup by hash |
 | systemd `-log-level` | `*:INFO` | DEBUG dumps full SC payloads — 382 KB per 40 lines |
 | systemd `-operation-mode` | *removed* | see §2 |
-| `prefs.toml` → `NodeDisplayName` | `$NODE_DISPLAY_NAME` | **upgrades silently erase it** — `node_name()` is called only from the *install* paths, never from `upgrade_squad`, while `update()` overwrites `prefs.toml`. Without this your nodes go unnamed on the explorer |
+| `prefs.toml` → `NodeDisplayName` | `$NODE_DISPLAY_NAME` | optional convenience only — upgrades already preserve this (see table below). Useful to set it non-interactively on a fresh install, or to change it later across all four nodes at once |
 
-Set the display name once and it is remembered in `~/.mvx-deephistory.conf`:
+Setting it once is remembered in `~/.mvx-deephistory.conf`; leave it unset and the script
+does not touch `prefs.toml` at all:
 
 ```bash
 NODE_DISPLAY_NAME=foxsy ~/mvx-deephistory-apply.sh

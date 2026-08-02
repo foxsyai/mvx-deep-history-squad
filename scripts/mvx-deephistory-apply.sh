@@ -7,9 +7,10 @@
 #    ./script.sh github_pull               -> `git reset --hard` wipes scripts repo edits
 #    ./script.sh observing_squad           -> regenerates systemd units
 #
-#  Why a script and not config: the node's own OverridableConfigTomlValues lives in
-#  prefs.toml, which `update()` also overwrites. And variables.cfg only preserves six
-#  known fields, so custom variables there do not survive github_pull either.
+#  Scope: config.toml settings ONLY. The upgrade scripts already preserve prefs.toml
+#  (save/restore around update()), the six variables.cfg fields, and the systemd units.
+#  What they do NOT preserve are the config.toml keys below -- notably NumEpochsToKeep,
+#  which reverts to 4 and will prune the retention window away.
 #
 #  ORDER MATTERS — run this BEFORE starting the nodes:
 #      ./script.sh upgrade_squad     # leaves nodes stopped, config/ reset to stock
@@ -133,8 +134,11 @@ for n in $NODES; do
   fi
 
   # --- prefs.toml: explorer display name ------------------------------------
-  # upgrade_squad never calls node_name(), and update() overwrites prefs.toml, so the
-  # display name is lost on every upgrade unless re-applied here.
+  # NOTE: upgrades already preserve this on their own -- both `upgrade` and
+  # `upgrade_squad` copy prefs.toml to prefs.toml.save before update() and mv it back
+  # after. This block is a convenience for setting the name non-interactively on a
+  # fresh install, or changing it across all nodes at once. Left unset, prefs.toml
+  # is not touched.
   PREFS="$NODES_ROOT/node-$n/config/prefs.toml"
   if [ -n "$NODE_DISPLAY_NAME" ]; then
     if [ -f "$PREFS" ]; then
