@@ -3,6 +3,7 @@
 Working notes for the mainnet deep-history squad. Written so a rebuild — here or on
 another machine — is a straight line instead of a re-investigation.
 
+**Repo:** `github.com/foxsyai/mvx-deep-history-squad` (private)
 **Built:** 1 August 2026 (epoch 2192 → 2193)
 **Host:** `sebastian@192.168.69.104` (NUC10i7FNH · 31 GB RAM · 12 threads · 3.6 TB NVMe)
 
@@ -106,9 +107,12 @@ sed -i 's|^NODE_EXTRA_FLAGS=.*|NODE_EXTRA_FLAGS=""|'     config/variables.cfg   
 ./script.sh observing_squad
 
 # ---- 5. apply our customizations BEFORE first start (see §4 for why) ----
-#    copy scripts/mvx-deephistory-apply.sh from this project onto the box first, e.g.
-#    scp scripts/mvx-deephistory-apply.sh user@newhost:~/
-chmod +x ~/mvx-deephistory-apply.sh && ~/mvx-deephistory-apply.sh
+#    Private repo — authenticate first, once, on the new box:
+#      sudo apt install -y gh && gh auth login        (or use a PAT / deploy key)
+git clone https://github.com/foxsyai/mvx-deep-history-squad.git ~/mvx-deep-history
+cp ~/mvx-deep-history/scripts/mvx-deephistory-apply.sh ~/
+chmod +x ~/mvx-deephistory-apply.sh
+~/mvx-deephistory-apply.sh
 
 # ---- 6. start ----
 ./script.sh start
