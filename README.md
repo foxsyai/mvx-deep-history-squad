@@ -226,12 +226,37 @@ It is idempotent and fails loudly if upstream renames a key.
 
 ## 5. Storage
 
-Measured on this host, shard 0: **~3.7 GB per epoch**. Empty epoch dirs are ~372 KB —
-the pruning storer pre-creates all 62 directories on start, which is normal and harmless.
+**Size the disk before you pick a retention window — this is the binding constraint.**
 
-Rough steady state at `NumEpochsToKeep = 62`: **~700 GB** across all four nodes.
-Against 3.6 TB that is comfortable, but it is a *rolling* figure — verify it plateaus
-rather than assuming it will.
+Measured on mainnet (a full-trie epoch directory, all four nodes):
+
+| Node | Shard | Per epoch |
+|---|---|---|
+| node-0 | 0 | 3.7 GB |
+| node-1 | 1 | **10.8 GB** ← dominates |
+| node-2 | 2 | 3.2 GB |
+| node-3 | metachain | 0.2 GB |
+| | **total** | **≈ 17.6 GB / epoch** |
+
+Steady state is simply `NumEpochsToKeep × 17.6 GB`:
+
+| Retention | Disk needed | Minimum practical volume |
+|---|---|---|
+| 14 epochs | ~250 GB | 320 GB |
+| 30 epochs | ~530 GB | 700 GB |
+| 35 epochs | ~620 GB | 800 GB |
+| **62 epochs** | **~1.1 TB** | 1.5 TB |
+
+Add ~40 GB for OS, Go toolchain and logs, plus headroom — a full disk stops the nodes.
+Shard 1 is roughly 3× shard 0, so do not extrapolate from shard 0 alone (I did initially,
+and under-called 62 epochs by ~400 GB).
+
+Empty epoch dirs are ~372 KB — the pruning storer pre-creates the whole window on start,
+which is normal and harmless.
+
+These are *rolling* figures: nothing is pruned until the window fills, so the first real
+pruning event is `NumEpochsToKeep` days after install. Verify it plateaus then, rather
+than assuming it will.
 
 ```bash
 df -h /
