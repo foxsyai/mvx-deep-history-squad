@@ -1,0 +1,12 @@
+# Local agent/editor state
+.claude/
+
+# Config backups produced by the apply script
+*.bak
+*.bak-*
+config.toml.phase1
+config.toml.pre-redo
+
+# Runtime output
+*.log
+*.out
