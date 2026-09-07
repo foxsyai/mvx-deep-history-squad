@@ -326,6 +326,47 @@ error, **not** a silent fallback to current state. Handle that explicitly in cli
 
 ## 7. Troubleshooting
 
+**Build fails with `expected 'package', found 'EOF'`.** Go's caches are corrupt — in
+practice this means an unclean shutdown (power loss) hit the box mid-upgrade. The files
+still exist but are zero-length: the filesystem journalled the metadata and never flushed
+the data. Confirm the shutdown, then measure the damage:
+
+```bash
+last -x reboot shutdown | head                     # reboot with no matching shutdown = unclean
+journalctl --list-boots | tail -3
+find ~/go/pkg/mod       -name '*.go' -size 0 | wc -l   # module cache
+find ~/.cache/go-build  -type f      -size 0 | wc -l   # build cache
+```
+
+Purge **both**, then re-run the upgrade:
+
+```bash
+go clean -modcache
+go clean -cache
+cd ~/mx-chain-scripts && ./script.sh upgrade_squad
+```
+
+> Clearing only the module cache is the trap. The module files then look perfectly valid
+> on disk — right byte counts, zero empty files — and the build *still* fails with the
+> identical error, because Go is replaying truncated artifacts out of the **build** cache.
+> On 2026-09-07 that cost an hour: 14,966 of 19,046 `.go` files were empty in `pkg/mod`,
+> plus 319 zero-length entries in `.cache/go-build`. After both purges the node built in
+> ~90 s.
+
+**Node dies with `error while loading shared libraries: libvmexeccapi.so`.** The binary
+links the wasmer libraries by **absolute path into the module cache**:
+
+```bash
+objdump -x ~/elrond-nodes/node-0/node | grep RUNPATH
+#  .../go/pkg/mod/github.com/multiversx/mx-chain-vm-go@v1.5.48/wasmer2:...
+```
+
+So anything that wipes `$GOPATH/pkg` — `go clean -modcache`, or the scripts' own cleanup
+path — instantly bricks the *already-installed* binary, even though nothing touched
+`elrond-nodes/`. There is nothing to copy back and no `LD_LIBRARY_PATH` worth setting:
+rebuild with `upgrade_squad`, which relinks against the freshly downloaded module. Until
+then systemd will restart-loop the unit every 3 s (we caught one at 1,959 restarts).
+
 **Node is at `epoch = 0` and crawling.** It is replaying from genesis. Check:
 
 ```bash
@@ -356,7 +397,86 @@ wrong shard's range, not a fault. See §1.
 
 ---
 
-## 8. Reference
+## 8. Routine fleet maintenance
+
+OS hygiene across every node machine — run **monthly**, and again after each mainnet
+release once the nodes are on the new binary. Nothing here touches the chain config; it is
+apt + kernel + a reboot, plus proof that every node came back and caught up.
+
+`scripts/mvx-fleet-maint.sh` automates it:
+
+```bash
+./scripts/mvx-fleet-maint.sh survey     # read-only: what needs updating, are we all synced
+./scripts/mvx-fleet-maint.sh maintain   # update -> upgrade -> autoremove -> reboot -> verify
+./scripts/mvx-fleet-maint.sh report     # resource + sync table (disk / RAM / CPU / gap)
+```
+
+`survey` and `report` never write. `maintain` is the only mode that reboots.
+
+### 8.1 Inventory lives outside this repo
+
+The host list is **not** tracked here — this repo is public. Keep it at
+`~/.mvx-fleet.hosts` (mode `600`), or point `MVX_FLEET_HOSTS` wherever you like:
+
+```
+# name              user@host           nodes
+do-sh0              deploy@203.0.113.1  1
+observing-squad     deploy@203.0.113.9  4
+```
+
+### 8.2 What it does per machine, and why
+
+| Step | Command | Why it is written this way |
+|---|---|---|
+| 1 | `apt-get update` | — |
+| 2 | `apt-get upgrade -y` with `--force-confold` | keeps your existing config files. Without it an unattended run either hangs on a conffile prompt or silently replaces a tuned config |
+| 3 | `apt-get autoremove -y` | drops orphaned packages, mostly old kernels |
+| 4 | `systemctl stop elrond-*` **before** reboot | closes LevelDB cleanly. A node killed mid-write is exactly how §7's corruption story starts |
+| 5 | `shutdown -r now` | activates the kernel apt just installed |
+| 6 | wait for SSH, then 90 s grace | nodes need a moment before `/node/status` is meaningful |
+| 7 | probe every node | `gap = probable_highest - nonce`; want `gap≈0`, `syncing=0` |
+
+`apt` and `apt-get` share one package database — running both is redundant, once is enough.
+
+### 8.3 Order and safety
+
+- **Do the machines one at a time**, or in small independent batches, and confirm each is
+  back and synced before moving on. If one fails to return, stop the pass and investigate
+  before rebooting anything else.
+- **Check whether a node is actually in the consensus set before rebooting it.** A staked,
+  eligible validator loses rating for downtime; a pure observer loses nothing. The node's
+  own `erd_peer_type` is not sufficient — confirm against the network:
+
+  ```bash
+  KEY=$(curl -s localhost:8080/node/status | jq -r .data.metrics.erd_public_key_block_sign)
+  curl -s localhost:8079/validator/statistics | jq --arg k "$KEY" '.data.statistics[$k] // "not in validator set"'
+  ```
+
+- **Never reboot a node that is mid trie-sync.** You throw away hours of shard-state sync
+  for a reboot that can wait. Check `journalctl -u elrond-node-1 | grep "trie sync"` and
+  let it finish first.
+- Reboot flags survive: a box showing `*** System restart required ***` with weeks of
+  uptime is running an *older kernel than the one installed*. Compare them:
+
+  ```bash
+  echo "running $(uname -r) / newest $(ls -1 /boot/vmlinuz-* | sed 's|.*vmlinuz-||' | sort -V | tail -1)"
+  ```
+
+### 8.4 The report
+
+`report` emits a markdown table — disk free, RAM, load, and how many nodes are healthy:
+
+| machine | os | kernel | uptime | disk free | ram | cpu load | nodes ok |
+|---|---|---|---|---|---|---|---|
+| do-sh0 | Ubuntu 22.04.5 LTS | 5.15.0-191 | 1 minute | 50G free / 97G (49% used) | 1.0Gi / 7.8Gi | 0.84 0.36 0.13 | 1/1 |
+
+Watch the trend, not the snapshot: disk is the one that ends squads. See §5 — the
+deep-history box grows at ~17.6 GB per epoch and a full disk stops the nodes. DigitalOcean's
+per-droplet graphs cover CPU/RAM/IO history; this table is the cross-machine view it lacks.
+
+---
+
+## 9. Reference
 
 - Deep-history docs: https://docs.multiversx.com/integrators/deep-history-squad/
 - Operation modes: https://docs.multiversx.com/validators/node-operation-modes/

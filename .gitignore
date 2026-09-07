@@ -10,3 +10,7 @@ config.toml.pre-redo
 # Runtime output
 *.log
 *.out
+
+# Fleet inventory — holds machine addresses, never commit
+fleet.hosts
+*.hosts
