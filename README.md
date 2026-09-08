@@ -550,6 +550,32 @@ after a fast bootstrap the node looks perfect and answers about the tip correctl
 > `RoundDuration = 600` and `RoundsPerEpoch = 144000` — epoch length stays 24 h, but there
 > are **10× the blocks**. A replay after a long outage costs ten times as much.
 
+### 9.1a Historical **reads** and historical **execution** are different capabilities
+
+A flagless squad (this one) answers historical *reads* and cannot do historical *execution*.
+That distinction is invisible until a job needs the second one.
+
+| query | needs | works here |
+|---|---|---|
+| `/address/<sc>?blockNonce=` | account in the epoch's trie | ✅ back to the window start |
+| `/address/<sc>/keys?blockNonce=` | contract storage trie | ✅ (65,575 keys at epoch 2200) |
+| `/vm-values/query?blockNonce=` | **executes the contract** | ❌ at any past epoch |
+
+Execution needs the intermediate trie nodes that only `-operation-mode historical-balances`
+retains — the mode §2 rejects for unbounded growth. `Preferences.FullArchive = true` does
+**not** substitute for it: tested on shard-1 and metachain, same
+`getNodeFromDB: key not found`, reverted.
+
+> **Do not diagnose a regression from one successful query.** In September 2026 a query at
+> epoch 2224 was taken as proof the squad could answer historically. It could not: the query
+> ran at 14:02 and epoch 2225 began at 17:43, so 2224 *was the current epoch*. The tell that
+> it was never a regression is that failure is **uniform** — epochs a month before the
+> incident fail identically. Damage is not uniform; a missing capability is.
+
+Practical split: **reads from the squad, execution from a deep-history gateway.** Size a
+probe accordingly — `PROBE_FUNC=""` in `~/.mvx-guard.conf` tests a read, otherwise `verify`
+alerts every morning about a capability the node was never configured to have.
+
 ### 9.2 `scripts/mvx-history-guard.sh`
 
 ```bash
