@@ -281,10 +281,31 @@ do_report() {
   newest=$(ls "$d" 2>/dev/null | grep -o 'Epoch_[0-9]*' | sed 's/Epoch_//' | sort -n | tail -1)
   win="${oldest:-?}..${newest:-?}"
 
+  # --- config drift -----------------------------------------------------------
+  # An upgrade rewrites config/ wholesale and regenerates the systemd units. The
+  # fix is to run mvx-deephistory-apply.sh before starting the nodes — a manual
+  # step, and therefore one that eventually gets forgotten at an awkward hour.
+  # Forgetting it is silent and expensive: NumEpochsToKeep reverts to 4 and prunes
+  # the retention window away at the next epoch boundary. So check the settings
+  # every day and say so, rather than trusting anyone to remember.
+  local drift="" cfg="$HOME/elrond-nodes/node-0/config/config.toml"
+  local want_hb="${HISTORICAL_BALANCES_EXPECTED:-1}" keep="${NUM_EPOCHS_EXPECTED:-62}"
+  if [ -f "$cfg" ]; then
+    local k; k=$(grep -hE "^\s*NumEpochsToKeep = " "$cfg" | head -1 | tr -dc '0-9')
+    [ -n "$k" ] && [ "$k" != "$keep" ] && drift="$drift"$'\n'"  ⚠ NumEpochsToKeep=$k (expected $keep)"
+    grep -qE "^\s*AccountsStatePruningEnabled = false" "$cfg" \
+      || drift="$drift"$'\n'"  ⚠ AccountsStatePruningEnabled is not false"
+  fi
+  local units_hb; units_hb=$(grep -l "historical-balances" /etc/systemd/system/elrond-node-*.service 2>/dev/null | wc -l)
+  if [ "$want_hb" = "1" ] && [ "$units_hb" != "4" ]; then
+    drift="$drift"$'\n'"  ⚠ historical-balances on $units_hb/4 units — run mvx-deephistory-apply.sh"
+  fi
+  [ -n "$drift" ] && bad=1
+
   local head="✅ mvx daily report"; [ "$bad" = 1 ] && head="⚠️ mvx daily report (attention)"
   local text="$head — $(hostname -s)$lines
   window: $win
-  disk: $disk"
+  disk: $disk${drift}"
   log "$text"
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
     curl -s --max-time 15 -o /dev/null \
