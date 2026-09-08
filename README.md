@@ -510,7 +510,104 @@ per-droplet graphs cover CPU/RAM/IO history; this table is the cross-machine vie
 
 ---
 
-## 9. Reference
+## 9. Guarding against silent history loss
+
+**Sync status describes the tip. It says nothing about the past.** This is the failure mode
+that costs you a month of reporting, and no ordinary health check sees it.
+
+On 2026-09-07 a rebuilt squad reported `epoch 2230, gap=0, syncing=0` on all four shards —
+green by every check you would think to write — while its historical smart-contract state
+was gone. It was discovered a day later, by a month-end job failing.
+
+### 9.1 How history goes missing without anything looking wrong
+
+From `epochStart/bootstrap/process.go`:
+
+```go
+shouldStartFromNetwork := e.generalConfig.GeneralSettings.StartInEpochEnabled || e.flagsConfig.ForceStartFromNetwork
+if !shouldStartFromNetwork {
+    return e.bootstrapFromLocalStorage()      // replay forward — history preserved
+}
+```
+
+and inside `startFromSavedEpoch()`, the fork is `computeIfCurrentEpochIsSaved()`:
+
+- Node restarts **while the network is still in the epoch it last stored** → resumes from
+  storage, replays the missed blocks, **no hole**.
+- An **epoch boundary passed while it was down** → epoch-start bootstrap: it downloads the
+  current accounts trie and *skips* the blocks between. Those blocks, and the contract
+  storage tries for that span, are never written. Permanently.
+
+The state trie is a *snapshot* (downloadable at a point in time). Block and transaction
+history is a *log* — only ever accumulated by processing. That asymmetry is the whole story:
+after a fast bootstrap the node looks perfect and answers about the tip correctly, while
+`getNodeFromDB: key not found` waits in the past.
+
+**So the reaction window is "before the next epoch boundary"** — mainnet epochs start
+~17:40 UTC daily. An outage beginning at 17:00 gives you forty minutes, not a day.
+
+> **Supernova makes this sharper.** From `config.toml`, activation at epoch 2233 sets
+> `RoundDuration = 600` and `RoundsPerEpoch = 144000` — epoch length stays 24 h, but there
+> are **10× the blocks**. A replay after a long outage costs ten times as much.
+
+### 9.2 `scripts/mvx-history-guard.sh`
+
+```bash
+./mvx-history-guard.sh watch     # every 5 min: alive, synced, not restart-looping
+./mvx-history-guard.sh verify    # daily: can it still ANSWER a historical query?
+./mvx-history-guard.sh capture   # daily: this epoch's snapshot onto disk
+```
+
+`verify` is the one nothing else covers. It resolves the epoch-start nonce N epochs back and
+runs a real **contract execution** (`/vm-values/query`) against it — not just an account
+read. A balance lookup touches few trie nodes and passes even when contract storage is gone;
+only executing a contract exercises the SC storage trie. Set `PROBE_MIN_EPOCH` to the first
+epoch the node accumulated cleanly, so it tests what *should* be intact instead of alerting
+forever about damage that cannot be repaired.
+
+`capture` removes node health from the critical path for reporting: the month's data lands
+on disk as each epoch starts, so an incident costs operations time rather than data.
+
+Config in `~/.mvx-guard.conf` (mode `600` — it holds a bot token). Alerts are
+edge-triggered: one message when something breaks, one when it recovers. Install as timers:
+
+```bash
+sudo systemctl enable --now mvx-guard-watch.timer    # */5 min
+sudo systemctl enable --now mvx-guard-verify.timer   # daily 06:00 UTC
+sudo systemctl enable --now mvx-guard-capture.timer  # daily 19:00 UTC (after epoch start)
+```
+
+### 9.3 `StartInEpochEnabled = false` — an option, deliberately not the default
+
+§2 rejects `-operation-mode historical-balances`, correctly: it forces five settings at once,
+including both cleanup flags off, which makes `NumEpochsToKeep` dead and growth unbounded.
+
+But **`StartInEpochEnabled` is a plain `config.toml` setting and can be set on its own**,
+keeping retention intact. Setting it `false` means the node can never fast-bootstrap past a
+gap — it replays instead, so an outage costs time rather than history.
+
+It is not the default here, because it removes your escape hatch: a node that cannot
+bootstrap from storage falls back to genesis (~239 days, measured — see §2). It converts
+"permanent hole" into "possibly very long recovery", and post-Supernova a multi-day outage
+means replaying >1M blocks per shard.
+
+Adopt it only **after** §9.2 alerting exists, so outages are caught in minutes and the replay
+is minutes of blocks. If you do, put it in `mvx-deephistory-apply.sh` so upgrades cannot
+silently revert it, and keep the two-phase pattern of `scripts/phase2-when-ready.sh` for any
+rebuild: sync normally to the tip first, switch only once caught up.
+
+### 9.4 Order of defence
+
+1. **UPS with automatic graceful shutdown** — removes the trigger. The 2026-09 incident began
+   with two unclean reboots two minutes apart.
+2. **Detection in minutes** (§9.2) — the multiplier. Caught in 5 minutes, a replay is
+   5 minutes of blocks; caught in 2 days, it is a permanent hole.
+3. **Capture derived data continuously** (§9.2) — makes reporting independent of node health.
+4. **`StartInEpochEnabled = false`** (§9.3) — only once 2 is in place.
+
+---
+
+## 10. Reference
 
 - Deep-history docs: https://docs.multiversx.com/integrators/deep-history-squad/
 - Operation modes: https://docs.multiversx.com/validators/node-operation-modes/
