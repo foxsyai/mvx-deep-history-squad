@@ -622,6 +622,48 @@ is minutes of blocks. If you do, put it in `mvx-deephistory-apply.sh` so upgrade
 silently revert it, and keep the two-phase pattern of `scripts/phase2-when-ready.sh` for any
 rebuild: sync normally to the tip first, switch only once caught up.
 
+### 9.3a Making `historical-balances` affordable — prune the window from outside
+
+The objection to `historical-balances` in §2 is storage, not correctness: it forces both
+`CleanOldEpochsData` flags false, so `NumEpochsToKeep` is inert and nothing is ever deleted.
+`scripts/mvx-epoch-prune.sh` puts the ceiling back from outside the node:
+
+```bash
+./mvx-epoch-prune.sh --keep 62 --dry-run    # show exactly what would go
+./mvx-epoch-prune.sh --keep 62              # keep the newest 62 epochs
+```
+
+**Why deleting epoch directories is safe here.** `[StateTriesConfig] SnapshotsEnabled = true`
+means the node writes a *full* trie snapshot at every epoch boundary, so each `Epoch_*`
+directory is self-contained rather than a delta against older ones. That is visible on disk:
+epochs are a consistent ~11 GB on shard 1, not variable. It is also precisely what the
+node's own `AccountsTrieCleanOldEpochsData` does when it is permitted to. **Check
+`SnapshotsEnabled` before trusting this** — with snapshots off, epochs are not
+self-contained and external deletion would corrupt newer state.
+
+Verified 2026-09-08: removed 6 epochs while all four nodes were running; all stayed
+`active`, `gap=0`, zero panics or storage errors.
+
+Guards, because this deletes data:
+
+| guard | why |
+|---|---|
+| refuses if the current epoch cannot be read | a failed API call must not compute a floor |
+| refuses `--keep` below `MIN_KEEP` (5) | a typo must not wipe the archive |
+| refuses more than `MAX_DELETE` (10) epochs without `--force` | a bad epoch reading cannot cascade |
+| only matches `Epoch_<number>` | `Static/` holds the cross-epoch indexes — never touch it |
+| `--dry-run` | prints the exact directories and total size |
+
+Install as a daily timer (00:00 UTC is mid-epoch, so it never races an epoch transition):
+
+```bash
+sudo systemctl enable --now mvx-epoch-prune.timer
+```
+
+This combination — `historical-balances` for execution, external prune for the ceiling — is
+not a configuration MultiversX documents. Re-check `mvx-history-guard.sh floor` after the
+first few prunes to confirm the window is what you expect.
+
 ### 9.4 Order of defence
 
 1. **UPS with automatic graceful shutdown** — removes the trigger. The 2026-09 incident began
