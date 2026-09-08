@@ -202,9 +202,56 @@ do_capture() {
   fi
 }
 
+# ----------------------------------------------------------------------- floor
+# "From which epoch is this node's history actually complete?"
+#
+# Walks the epochs on disk oldest->newest and reports, per epoch, whether the node
+# can (a) resolve the epoch-start record, (b) READ state, (c) EXECUTE a contract.
+# Those are three different capabilities and they fail independently — a squad
+# without -operation-mode historical-balances reads far back and executes nowhere.
+# Run it after any rebuild or mode change to learn the real floor, then set
+# PROBE_MIN_EPOCH to it.
+
+do_floor() {
+  local step="${FLOOR_STEP:-5}" first_exec="" first_read=""
+  local cur; cur=$(api "http://localhost:8083/node/status" | jq -r '.data.metrics.erd_epoch_number // empty')
+  [ -z "$cur" ] && { echo "cannot read current epoch"; return 1; }
+  local oldest
+  oldest=$(ls "$HOME"/elrond-nodes/node-0/db/*/ -d 2>/dev/null | head -1)
+  oldest=$(ls "$oldest" 2>/dev/null | grep -o 'Epoch_[0-9]*' | sed 's/Epoch_//' | sort -n | head -1)
+  [ -z "$oldest" ] && oldest=$((cur - 60))
+  echo "scanning epochs $oldest..$cur (step $step)"
+  printf "%-8s %-12s %-10s %-8s %s\n" EPOCH NONCE EPOCH-REC READ EXEC
+  local e
+  for ((e=oldest; e<=cur; e+=step)); do
+    local n rec rd ex
+    n=$(api "$PROXY_URL/network/epoch-start/4294967295/by-epoch/$e" | jq -r '.data.epochStart.nonce // empty')
+    if [ -z "$n" ] || [ "$n" = null ]; then
+      printf "%-8s %-12s %-10s %-8s %s\n" "$e" "-" "MISSING" "-" "-"; continue
+    fi
+    rec=ok
+    rd=$(api "$PROXY_URL/address/${PROBE_SC:-}/keys?blockNonce=$n" | jq -r 'if ((.error//"")!="") then "FAIL" else "ok" end')
+    ex="n/a"
+    if [ -n "${EXEC_SC:-}" ] && [ -n "${EXEC_FUNC:-}" ]; then
+      local aj="[]"; [ -n "${EXEC_ARGS:-}" ] && aj=$(printf '%s' "$EXEC_ARGS" | jq -R 'split(",")')
+      ex=$(api "$PROXY_URL/vm-values/query?blockNonce=$n" -H 'Content-Type: application/json' \
+           -d "{\"scAddress\":\"$EXEC_SC\",\"funcName\":\"$EXEC_FUNC\",\"args\":$aj}" \
+           | jq -r 'if ((.error//"")!="") then "FAIL" else "ok" end')
+    fi
+    [ "$rd" = ok ] && [ -z "$first_read" ] && first_read=$e
+    [ "$ex" = ok ] && [ -z "$first_exec" ] && first_exec=$e
+    printf "%-8s %-12s %-10s %-8s %s\n" "$e" "$n" "$rec" "$rd" "$ex"
+  done
+  echo
+  echo "first epoch with working READ:      ${first_read:-none}"
+  echo "first epoch with working EXECUTION: ${first_exec:-none}"
+  echo "(set PROBE_MIN_EPOCH to the floor of whichever capability you rely on)"
+}
+
 case "${1:-watch}" in
   watch)   do_watch "$(hostname -s)" ;;
   verify)  do_verify ;;
   capture) do_capture ;;
-  *) echo "usage: $0 {watch|verify|capture}" >&2; exit 2 ;;
+  floor)   do_floor ;;
+  *) echo "usage: $0 {watch|verify|capture|floor}" >&2; exit 2 ;;
 esac
