@@ -367,6 +367,40 @@ path — instantly bricks the *already-installed* binary, even though nothing to
 rebuild with `upgrade_squad`, which relinks against the freshly downloaded module. Until
 then systemd will restart-loop the unit every 3 s (we caught one at 1,959 restarts).
 
+**`apt upgrade` hangs forever on a desktop-flavoured node box.** Not a slow mirror — a
+systemd job deadlock. On a machine that boots `graphical.target` with `quiet splash` but is
+only ever driven over SSH, nothing dismisses the boot splash, so `plymouth --wait` never
+returns and `plymouth-quit-wait.service` sits in `activating (start)` for the whole uptime.
+That blocks `multi-user.target`, which blocks every queued service **start** job — so the
+first dpkg postinst that restarts a service waits forever, holding the dpkg lock with the
+upgrade half-applied.
+
+```bash
+systemctl list-jobs --no-pager        # plymouth-quit-wait "running", targets "waiting"
+ps -eo pid,etimes,cmd | grep -E "[p]ostinst|[d]eb-systemd-invoke"
+```
+
+Unblock the machine — the queue drains instantly and dpkg continues on its own. **Do not
+kill dpkg:**
+
+```bash
+sudo systemctl stop plymouth-quit-wait.service
+sudo plymouth quit
+sudo dpkg --configure -a          # finish anything left interrupted
+```
+
+Permanent fix, reversible and touching no bootloader config:
+
+```bash
+sudo systemctl mask plymouth-quit-wait.service
+sudo systemctl reset-failed plymouth-quit-wait.service
+```
+
+> Related trap: **an SSH timeout during `apt-get upgrade` does not kill the remote dpkg.**
+> It keeps running detached and keeps the lock. Check `pgrep -af dpkg` and wait it out
+> rather than retrying, or you will fight the lock and risk a half-configured system. Run
+> long upgrades detached in the first place: `setsid nohup ... > ~/upgrade.log 2>&1 &`.
+
 **Node is at `epoch = 0` and crawling.** It is replaying from genesis. Check:
 
 ```bash
