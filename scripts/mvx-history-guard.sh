@@ -248,10 +248,58 @@ do_floor() {
   echo "(set PROBE_MIN_EPOCH to the floor of whichever capability you rely on)"
 }
 
+# -------------------------------------------------------------------- report
+# A once-a-day heartbeat, sent unconditionally.
+#
+# watch/verify are edge-triggered: they speak only when something changes, so a
+# healthy fleet is silent. That is right for alerts and wrong as the ONLY signal,
+# because silence is indistinguishable from "the guard itself stopped running" —
+# a dead timer, a powered-off machine, a revoked bot token all look like calm.
+# This sends a short digest every day, so no message IS the alarm.
+
+do_report() {
+  local lines="" bad=0 n
+  for n in 0 1 2 3; do
+    local p=$((8080 + n)) r shard ep gap sync
+    r=$(api "http://localhost:$p/node/status")
+    if [ -z "$r" ]; then lines="$lines"$'\n'"  node-$n: NO API"; bad=1; continue; fi
+    shard=$(echo "$r" | jq -r '.data.metrics.erd_shard_id // "?"')
+    [ "$shard" = "4294967295" ] && shard=meta
+    ep=$(echo "$r"   | jq -r '.data.metrics.erd_epoch_number // "?"')
+    sync=$(echo "$r" | jq -r '.data.metrics.erd_is_syncing // 1')
+    gap=$(( $(echo "$r" | jq -r '.data.metrics.erd_probable_highest_nonce // 0') - $(echo "$r" | jq -r '.data.metrics.erd_nonce // 0') ))
+    [ "$gap" -lt 0 ] && gap=0
+    [ "$sync" != "0" ] && bad=1
+    [ "$gap" -gt "$GAP_LIMIT" ] && bad=1
+    lines="$lines"$'\n'"  shard $shard: epoch $ep, gap $gap$([ "$sync" != 0 ] && echo ' SYNCING')"
+  done
+
+  local disk win oldest newest d
+  disk=$(df -h / | tail -1 | awk '{print $4" free ("$5" used)"}')
+  d=$(ls -d "$HOME"/elrond-nodes/node-0/db/*/ 2>/dev/null | head -1)
+  oldest=$(ls "$d" 2>/dev/null | grep -o 'Epoch_[0-9]*' | sed 's/Epoch_//' | sort -n | head -1)
+  newest=$(ls "$d" 2>/dev/null | grep -o 'Epoch_[0-9]*' | sed 's/Epoch_//' | sort -n | tail -1)
+  win="${oldest:-?}..${newest:-?}"
+
+  local head="✅ mvx daily report"; [ "$bad" = 1 ] && head="⚠️ mvx daily report (attention)"
+  local text="$head — $(hostname -s)$lines
+  window: $win
+  disk: $disk"
+  log "$text"
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    curl -s --max-time 15 -o /dev/null \
+      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+      --data-urlencode "text=${text}" || log "(telegram send failed)"
+  fi
+  return 0
+}
+
 case "${1:-watch}" in
   watch)   do_watch "$(hostname -s)" ;;
   verify)  do_verify ;;
   capture) do_capture ;;
   floor)   do_floor ;;
-  *) echo "usage: $0 {watch|verify|capture|floor}" >&2; exit 2 ;;
+  report)  do_report ;;
+  *) echo "usage: $0 {watch|verify|capture|floor|report}" >&2; exit 2 ;;
 esac
