@@ -142,7 +142,7 @@ render_report() {
 
 do_survey() {
   local name target
-  while read -r name target _; do
+  while read -r name target _ <&3; do
     [ -z "${name:-}" ] && continue; case "$name" in \#*) continue;; esac
     echo
     local data; data=$(probe_host "$target")
@@ -150,7 +150,7 @@ do_survey() {
     local upg; upg=$(echo "$data" | grep '^UPGRADABLE|' | cut -d'|' -f2)
     render_report "$name" "$data"
     printf "  apt     %s package(s) upgradable\n" "${upg:-?}"
-  done < <(grep -vE '^\s*(#|$)' "$INV")
+  done 3< <(grep -vE '^\s*(#|$)' "$INV")
 }
 
 do_report() {
@@ -158,7 +158,7 @@ do_report() {
   echo "| machine | os | kernel | uptime | disk free | ram | cpu load | nodes ok |"
   echo "|---|---|---|---|---|---|---|---|"
   local name target
-  while read -r name target _; do
+  while read -r name target _ <&3; do
     [ -z "${name:-}" ] && continue; case "$name" in \#*) continue;; esac
     local data; data=$(probe_host "$target")
     if [ -z "$data" ]; then echo "| $name | **UNREACHABLE** | | | | | | |"; continue; fi
@@ -168,12 +168,12 @@ do_report() {
     printf "| %s | %s | %s | %s | %s | %s | %s | %s/%s |\n" \
       "$name" "$(field "$data" OS)" "$(field "$data" KERNEL)" "$(field "$data" UPTIME)" \
       "$(field "$data" DISK)" "$(field "$data" RAM)" "$(field "$data" LOAD)" "$ok" "$total"
-  done < <(grep -vE '^\s*(#|$)' "$INV")
+  done 3< <(grep -vE '^\s*(#|$)' "$INV")
 }
 
 do_maintain() {
   local name target
-  while read -r name target _; do
+  while read -r name target _ <&3; do
     [ -z "${name:-}" ] && continue; case "$name" in \#*) continue;; esac
     echo
     echo "${CYN}=========== $name ===========${NC}"
@@ -199,7 +199,7 @@ do_maintain() {
     echo "-- 5. post-reboot health"
     local data; data=$(probe_host "$target")
     render_report "$name" "$data" | sed 's/^/   /'
-  done < <(grep -vE '^\s*(#|$)' "$INV")
+  done 3< <(grep -vE '^\s*(#|$)' "$INV")
 }
 
 # ------------------------------------------------------------------------ main
