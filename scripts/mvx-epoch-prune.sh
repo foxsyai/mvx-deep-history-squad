@@ -26,7 +26,15 @@
 #   * refuses to delete more than MAX_DELETE epochs in one run without --force,
 #     so a bad epoch reading cannot cascade into deleting everything
 #   * never touches Static/ or anything that is not Epoch_<number>
-#   * --dry-run prints exactly what it would remove
+#   * --dry-run prints exactly what it would remove, and never alerts
+#
+# Empty skeletons
+# ---------------
+# In historical-balances mode the node leaves behind Epoch_* directories for epochs it
+# never stored: empty LevelDB databases (LOCK, LOG, MANIFEST, no tables), a few KiB each,
+# appearing roughly one epoch per hour below the window. They hold no data, so they are
+# swept without counting toward MAX_DELETE. Counted, they made every nightly run exceed
+# the limit and refuse, so nothing was pruned from 2026-09-09 until this was fixed.
 #
 # Usage: mvx-epoch-prune.sh [--keep N] [--dry-run] [--force]
 
@@ -85,30 +93,43 @@ log "current epoch $CUR, keeping $KEEP -> deleting Epoch_* older than $FLOOR"
 
 # --- plan ---------------------------------------------------------------------
 
-PLAN=""; COUNT=0
+# has_data <dir> — true if any LevelDB under it holds a table or a non-empty journal.
+has_data() {
+  [ -n "$(find "$1" -type f \( -name '*.ldb' -o -name '*.sst' -o \
+          \( -name '[0-9]*.log' -size +0 \) \) -print -quit 2>/dev/null)" ]
+}
+
+PLAN=""; COUNT=0; EMPTY=""; NEMPTY=0
 for nd in "$NODES_ROOT"/node-*/db/*/; do
   [ -d "$nd" ] || continue
   for d in "$nd"Epoch_*; do
     [ -d "$d" ] || continue
     e="${d##*/Epoch_}"
     case "$e" in ''|*[!0-9]*) continue ;; esac      # never touch Static or oddities
-    if [ "$e" -lt "$FLOOR" ]; then
+    [ "$e" -lt "$FLOOR" ] || continue
+    if has_data "$d"; then
       PLAN="$PLAN$d"$'\n'; COUNT=$((COUNT + 1))
+    else
+      EMPTY="$EMPTY$d"$'\n'; NEMPTY=$((NEMPTY + 1))
     fi
   done
 done
 
-if [ "$COUNT" -eq 0 ]; then log "nothing older than $FLOOR — nothing to do"; exit 0; fi
+if [ "$COUNT" -eq 0 ] && [ "$NEMPTY" -eq 0 ]; then
+  log "nothing older than $FLOOR — nothing to do"; exit 0
+fi
 
 # Distinct epochs, not directories: 4 nodes means 4 dirs per epoch.
 EPOCHS=$(printf '%s' "$PLAN" | sed 's|.*/Epoch_||' | sort -un | tr '\n' ' ')
 NEPOCHS=$(printf '%s' "$EPOCHS" | wc -w)
 SIZE=$(printf '%s' "$PLAN" | grep -v '^$' | tr '\n' '\0' | du -sch --files0-from=- 2>/dev/null | tail -1 | cut -f1)
 
-log "would remove $COUNT directories across $NEPOCHS epochs ($SIZE): $EPOCHS"
+log "would remove $COUNT directories across $NEPOCHS epochs with data (${SIZE:-0}): $EPOCHS"
+log "would sweep $NEMPTY empty skeleton directories (no tables, not counted toward MAX_DELETE)"
 
 if [ "$NEPOCHS" -gt "$MAX_DELETE" ] && [ "$FORCE" -eq 0 ]; then
-  notify "🔴 epoch-prune REFUSED: $NEPOCHS epochs exceeds MAX_DELETE=$MAX_DELETE (current epoch $CUR, floor $FLOOR). Nothing deleted — re-run with --force if this is genuinely intended."
+  msg="🔴 epoch-prune REFUSED: $NEPOCHS epochs with data exceeds MAX_DELETE=$MAX_DELETE (current epoch $CUR, floor $FLOOR). Nothing deleted — re-run with --force if this is genuinely intended."
+  if [ "$DRY" -eq 1 ]; then log "--dry-run: $msg"; else notify "$msg"; fi
   exit 1
 fi
 
@@ -117,10 +138,19 @@ if [ "$DRY" -eq 1 ]; then log "--dry-run: nothing deleted"; exit 0; fi
 # --- execute ------------------------------------------------------------------
 
 BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+printf '%s' "$EMPTY" | while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  rm -rf -- "$d"
+done
+[ "$NEMPTY" -gt 0 ] && log "swept $NEMPTY empty skeleton directories"
 printf '%s' "$PLAN" | while IFS= read -r d; do
   [ -n "$d" ] || continue
   rm -rf -- "$d" && log "removed $d"
 done
 AFTER=$(df -h / | tail -1 | awk '{print $4}')
 
-notify "🧹 epoch-prune: removed $NEPOCHS epochs (<$FLOOR), $SIZE freed. Disk free $BEFORE -> $AFTER. Window now $FLOOR..$CUR."
+# Skeleton-only runs are routine housekeeping: journal only. The daily guard report is
+# the heartbeat; a Telegram message every night for a few KiB would train you to ignore it.
+if [ "$NEPOCHS" -gt 0 ]; then
+  notify "🧹 epoch-prune: removed $NEPOCHS epochs (<$FLOOR), $SIZE freed. Disk free $BEFORE -> $AFTER. Window now $FLOOR..$CUR."
+fi

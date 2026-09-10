@@ -693,9 +693,17 @@ Guards, because this deletes data:
 |---|---|
 | refuses if the current epoch cannot be read | a failed API call must not compute a floor |
 | refuses `--keep` below `MIN_KEEP` (5) | a typo must not wipe the archive |
-| refuses more than `MAX_DELETE` (10) epochs without `--force` | a bad epoch reading cannot cascade |
+| refuses more than `MAX_DELETE` (10) epochs *with data* without `--force` | a bad epoch reading cannot cascade |
 | only matches `Epoch_<number>` | `Static/` holds the cross-epoch indexes — never touch it |
-| `--dry-run` | prints the exact directories and total size |
+| `--dry-run` | prints the exact directories and total size; never sends an alert |
+
+**Empty skeleton directories.** In this mode the node also leaves `Epoch_*` directories
+for epochs it never stored: empty LevelDB databases (no tables), a few KiB each, appearing
+about one per hour. The prune sweeps them without counting them toward `MAX_DELETE`. It
+used to count them. From 2026-09-09 every nightly run saw 13, then 34 "epochs" to delete,
+refused, and pruned nothing, while the real data was all inside the window. A guard that
+trips on junk teaches you to ignore it, so the check now looks for LevelDB tables (or a
+non-empty journal) before calling a directory an epoch.
 
 Install as a daily timer (00:00 UTC is mid-epoch, so it never races an epoch transition):
 
