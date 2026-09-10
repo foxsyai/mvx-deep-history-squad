@@ -568,6 +568,22 @@ Watch the trend, not the snapshot: disk is the one that ends squads. See §5 —
 deep-history box grows at ~17.6 GB per epoch and a full disk stops the nodes. DigitalOcean's
 per-droplet graphs cover CPU/RAM/IO history; this table is the cross-machine view it lacks.
 
+### 8.5 Adding or reinstalling a machine — checklist
+
+Every row is a mistake that was made, or nearly made, on this fleet.
+
+| # | Do | Why |
+|---|---|---|
+| 1 | Decide the role first: observing squad, deep-history squad, multikey **main**, or multikey **backup** | every row below depends on it |
+| 2 | Upgrade with **option 5 `upgrade_multikey`** on multikey hosts, **option 6 `upgrade_squad`** on squads, never option 4 | plain `upgrade` leaves `DbLookupExtensions` off |
+| 3 | After `install` / `add_node` / `observers` / `multikey`, run `./scripts/mvx-fleet-maint.sh loglevel` | their unit template starts nodes at `*:DEBUG` (§8.3) |
+| 4 | Deep-history box: `~/mvx-deephistory-apply.sh` **before the first start** and after every upgrade | stock config prunes the window to 4 epochs at the next boundary (§4). In historical-balances mode it also pins `PeerStatePruningEnabled = false`; with pruning on, the metachain deadlocked on 2026-09-09 |
+| 5 | Multikey: confirm the key count in `allValidatorsKeys.pem` and `RedundancyLevel` (0 main, 1 backup), not the node's own key | the node's own key is a throwaway in multikey mode (§8.3) |
+| 6 | Multikey: a main and its backup are **never down together**, for any reboot, restart or upgrade | the backup signs only while the main is silent |
+| 7 | Intel NUCs: install `scripts/mvx-thermal-cap.sh` (12 W package cap + 88 °C watch) | degraded cooling hard-resets the box with no log at all (§7) |
+| 8 | Add the machine to `~/.mvx-fleet.hosts` (never the repo), then `survey`: every node `gap≈0`, `syncing=0`, `log=*:INFO` | the inventory is what `maintain`, `report` and `loglevel` walk |
+| 9 | Deep-history box: guard and prune timers, and `PROBE_MIN_EPOCH` from `mvx-history-guard.sh floor` | §9. Size the prune window one epoch larger than you query (§9.3a) |
+
 ---
 
 ## 9. Guarding against silent history loss
@@ -632,9 +648,20 @@ retains — the mode §2 rejects for unbounded growth. `Preferences.FullArchive 
 > it was never a regression is that failure is **uniform** — epochs a month before the
 > incident fail identically. Damage is not uniform; a missing capability is.
 
-Practical split: **reads from the squad, execution from a deep-history gateway.** Size a
-probe accordingly — `PROBE_FUNC=""` in `~/.mvx-guard.conf` tests a read, otherwise `verify`
-alerts every morning about a capability the node was never configured to have.
+Practical split for a flagless squad: **reads from the squad, execution from a deep-history
+gateway.** Size a probe accordingly — `PROBE_FUNC=""` in `~/.mvx-guard.conf` tests a read,
+otherwise `verify` alerts every morning about a capability the node was never configured to
+have.
+
+> **Update 2026-09-11 — with `historical-balances` on, execution reaches back too.** This
+> box switched to the mode on 2026-09-08 (§9.3a). The expectation was that execution would
+> work only for epochs recorded *after* the switch. Measured three days later, it also works
+> for epochs recorded **before** it. The staking job's read and `getAmountOut` returned
+> correct answers for epochs 2194–2227. Prices for 2224–2227 are bit-identical to the
+> official gateway's. The trie data had been on disk all along; the flagless configuration
+> just never looked it up. Which of the mode's settings unlocks it is not isolated, but it
+> is not `FullArchive` alone (tested above). What does not come back is a *block gap*:
+> 2228–2230, the outage, fail either way.
 
 ### 9.2 `scripts/mvx-history-guard.sh`
 
@@ -732,6 +759,38 @@ This combination — `historical-balances` for execution, external prune for the
 not a configuration MultiversX documents. Re-check `mvx-history-guard.sh floor` after the
 first few prunes to confirm the window is what you expect.
 
+**Size the window one epoch larger than you query.** The staking job resolves each epoch's
+*metachain* start nonce and passes it as `blockNonce` to a query that runs on *shard 1*
+(the pool contract). Shard 1's nonces run ~8,000 ahead of the metachain's, so that number
+names a shard-1 block from *before* the epoch boundary: ~13 h earlier with 6 s rounds,
+~80 min after Supernova. The official gateway resolves it the same way, which is why the
+numbers always matched. The consequence for storage is that **the price for epoch N reads
+epoch N−1's directory**. Proven on 2026-09-11: with `Epoch_2230` moved away, 2231's staking
+read still worked but its price came back empty. Restoring 2230 fixed it. So a window of
+K epochs serves the full job for K−1 of them. For "a calendar month, run in the first three
+days of the next", keep 34, not 33.
+
+**Trimming older epochs by hand: move aside, verify, then delete.** Deleting history is
+irreversible, and on this mode a node that cannot start from its own disk replays from
+genesis (§2). So never `rm` epochs in one step:
+
+```bash
+Q=~/epoch-quarantine-$(date +%Y%m%d)            # same filesystem: mv is an instant rename
+# 1. record the answers you care about (staking keys + price) for the epochs you KEEP
+# 2. move Epoch_<n> below the cut out of every node-*/db/1/ into $Q/node-N/
+# 3. re-run 1 — the answers must be byte-identical; restore anything they depend on
+# 4. restart ONE node — its log must say "Bootstrap epoch = <current>", not genesis
+# 5. wait for the next epoch change, check again, only then: rm -rf "$Q"
+```
+
+Done this way on 2026-09-11, it caught the N−1 dependency above at step 3, with nothing
+lost. The kept run is 2230 (a dependency only) + 2231 onward, because 2228–2230 are the
+outage gap and a run broken by a gap is no use to a monthly job.
+
+At every restart in this mode each node logs `WARN could not retrieve snapshot info — key
+not found`. It appeared at every restart since 2026-09-09, before any epoch was moved, and
+does not trigger a state re-sync. It is routine, not a symptom.
+
 ### 9.4 Order of defence
 
 1. **UPS with automatic graceful shutdown** — removes the trigger. The 2026-09 incident began
@@ -751,8 +810,8 @@ first few prunes to confirm the window is what you expect.
 - Mainnet genesis: `1596117600` = **2020-07-30 14:00 UTC**; epoch N starts genesis + N days.
   Daily-archive naming uses that date (`31-Jul-2026` = epoch 2192).
 
-Initial deep-history floors from the 1 Aug 2026 build (these advance once the 62-epoch
-window starts rolling):
+Initial deep-history floors from the 1 Aug 2026 build (historical; since 2026-09-11 the
+kept run starts at epoch 2231, with 2230 retained only as its dependency — §9.3a):
 
 | Shard | First queryable nonce |
 |---|---|
