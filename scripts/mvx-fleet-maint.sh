@@ -3,9 +3,13 @@
 # mvx-fleet-maint.sh — routine OS maintenance + health report across a fleet of
 # MultiversX node machines (observing squads, deep-history squads, single nodes).
 #
-#   survey    read-only pre-flight: OS, pending updates, node version, sync state
+#   survey    read-only pre-flight: OS, pending updates, node version, sync state, log level
 #   maintain  apt update/upgrade/autoremove -> graceful node stop -> reboot -> verify
-#   report    resource + node-sync table (disk / RAM / CPU / gap)
+#   report    resource + node-sync table (disk / RAM / CPU / gap / log level)
+#   loglevel  put every node on -log-level *:INFO: fix units, then restart only the nodes
+#             still running another level, one at a time; a multikey node only while
+#             another machine signs for its shard. No-op when all are INFO. Run it after
+#             any mx-chain-scripts install / add_node / observers / multikey.
 #
 # Hosts come from an inventory file that is deliberately NOT tracked in this repo
 # (it holds addresses). Format, one machine per line:
@@ -61,9 +65,15 @@ fi
 for p in 8080 8081 8082 8083; do
   R=$(curl -s --max-time 5 "http://localhost:$p/node/status" 2>/dev/null)
   [ -z "$R" ] && continue
-  echo "$R" | jq -r --arg p "$p" '.data.metrics |
+  # log level the running process was started with (no flag = the node's default, INFO)
+  LVL="?"; PID=$(systemctl show -p MainPID --value "elrond-node-$((p - 8080))" 2>/dev/null)
+  if [ "${PID:-0}" -gt 0 ] 2>/dev/null; then
+    LVL=$(tr '\0' ' ' < /proc/$PID/cmdline 2>/dev/null | grep -oE -- '-log-level [^ ]+' | cut -d' ' -f2)
+    LVL=${LVL:-*:INFO}
+  fi
+  echo "$R" | jq -r --arg p "$p" --arg l "$LVL" '.data.metrics |
     (if .erd_shard_id == 4294967295 then "meta" else (.erd_shard_id|tostring) end) as $s |
-    "NODE|\($p)|\($s)|\(.erd_epoch_number)|\(.erd_nonce)|\((.erd_probable_highest_nonce // 0) - (.erd_nonce // 0))|\(.erd_is_syncing)|\(.erd_app_version)"' 2>/dev/null
+    "NODE|\($p)|\($s)|\(.erd_epoch_number)|\(.erd_nonce)|\((.erd_probable_highest_nonce // 0) - (.erd_nonce // 0))|\(.erd_is_syncing)|\(.erd_app_version)|\($l)"' 2>/dev/null
 done
 EOS
 }
@@ -101,6 +111,42 @@ echo "reboot issued"
 EOS
 }
 
+# Normalise every elrond-node unit to -log-level *:INFO. mx-chain-scripts' unit
+# template hard-codes *:DEBUG (config/functions.cfg, `systemd`), which after Supernova
+# is ~14,000 lines/min per node. install / add_node / observers / multikey regenerate
+# units from that template; upgrades and github_pull do not. Takes effect at the next
+# restart of each node. Idempotent.
+remote_fix_units() {
+cat <<'EOS'
+B=~/elrond-unit-backup-$(date +%Y%m%d); changed=0
+for u in /etc/systemd/system/elrond-node-*.service; do
+  [ -f "$u" ] || continue
+  grep -qE -- '-log-level [^ ]+' "$u" && ! grep -qE -- '-log-level \*:INFO( |$)' "$u" || continue
+  mkdir -p "$B"; cp -p "$u" "$B/"
+  sudo -n sed -i -E 's/-log-level [^ ]+/-log-level *:INFO/' "$u" && changed=1 && echo "fixed $(basename "$u")"
+done
+[ "$changed" = 1 ] && sudo -n systemctl daemon-reload
+exit 0
+EOS
+}
+
+# One line per node: LVL|n|port|running level|managed keys|shard|syncing|gap|nonce
+remote_levels() {
+cat <<'EOS'
+for u in $(ls /etc/systemd/system/ | grep -oE '^elrond-node-[0-9]+' | sort -u); do
+  n=${u#elrond-node-}; p=$((8080 + n)); lvl=stopped; keys=0
+  pid=$(systemctl show -p MainPID --value "$u")
+  if [ "${pid:-0}" -gt 0 ] 2>/dev/null; then
+    lvl=$(tr '\0' ' ' < /proc/$pid/cmdline | grep -oE -- '-log-level [^ ]+' | cut -d' ' -f2); lvl=${lvl:-*:INFO}
+    keys=$(grep -c "BEGIN" "$(readlink /proc/$pid/cwd)/config/allValidatorsKeys.pem" 2>/dev/null); keys=${keys:-0}
+  fi
+  st=$(curl -s --max-time 5 "localhost:$p/node/status" | jq -r '.data.metrics |
+       "\(.erd_shard_id)|\(.erd_is_syncing)|\((.erd_probable_highest_nonce//0)-(.erd_nonce//0))|\(.erd_nonce//0)"' 2>/dev/null)
+  echo "LVL|$n|$p|$lvl|$keys|${st:-?|?|?|?}"
+done
+EOS
+}
+
 # ------------------------------------------------------------------- utilities
 
 probe_host() { ssh "${SSH_OPTS[@]}" "$1" 'bash -s' <<< "$(remote_probe)" 2>/dev/null; }
@@ -129,12 +175,14 @@ render_report() {
   printf "  disk    %s\n" "$(field "$data" DISK)"
   printf "  ram     %s | swap %s\n" "$(field "$data" RAM)" "$(field "$data" SWAP)"
   printf "  cpu     %s cores | load %s\n" "$(field "$data" CORES)" "$(field "$data" LOAD)"
-  echo "$data" | grep '^NODE|' | while IFS='|' read -r _ port shard epoch nonce gap syncing ver; do
+  echo "$data" | grep '^NODE|' | while IFS='|' read -r _ port shard epoch nonce gap syncing ver lvl; do
     local flag="$GRN ok $NC"
     [ "$syncing" != "0" ] && flag="$YLW syncing $NC"
     [ "${gap:-0}" -gt 5 ] 2>/dev/null && flag="$YLW gap $gap $NC"
-    printf "  node    :%s shard=%-4s epoch=%s nonce=%s gap=%s [%b]\n" \
-      "$port" "$shard" "$epoch" "$nonce" "$gap" "$flag"
+    # DEBUG/TRACE: ~14k lines/min per node after Supernova, and the journal keeps an hour
+    case "$lvl" in *DEBUG*|*TRACE*) flag="$flag$YLW log $lvl $NC" ;; esac
+    printf "  node    :%s shard=%-4s epoch=%s nonce=%s gap=%s log=%s [%b]\n" \
+      "$port" "$shard" "$epoch" "$nonce" "$gap" "$lvl" "$flag"
   done
 }
 
@@ -155,19 +203,20 @@ do_survey() {
 
 do_report() {
   echo
-  echo "| machine | os | kernel | uptime | disk free | ram | cpu load | nodes ok |"
-  echo "|---|---|---|---|---|---|---|---|"
+  echo "| machine | os | kernel | uptime | disk free | ram | cpu load | nodes ok | log level |"
+  echo "|---|---|---|---|---|---|---|---|---|"
   local name target
   while read -r name target _ <&3; do
     [ -z "${name:-}" ] && continue; case "$name" in \#*) continue;; esac
     local data; data=$(probe_host "$target")
-    if [ -z "$data" ]; then echo "| $name | **UNREACHABLE** | | | | | | |"; continue; fi
-    local total ok
+    if [ -z "$data" ]; then echo "| $name | **UNREACHABLE** | | | | | | | |"; continue; fi
+    local total ok lvls
     total=$(echo "$data" | grep -c '^NODE|')
     ok=$(echo "$data" | awk -F'|' '$1=="NODE" && $7=="0" && $6+0<=5' | wc -l)
-    printf "| %s | %s | %s | %s | %s | %s | %s | %s/%s |\n" \
+    lvls=$(echo "$data" | awk -F'|' '$1=="NODE"{print $9}' | sort -u | paste -sd, -)
+    printf "| %s | %s | %s | %s | %s | %s | %s | %s/%s | %s |\n" \
       "$name" "$(field "$data" OS)" "$(field "$data" KERNEL)" "$(field "$data" UPTIME)" \
-      "$(field "$data" DISK)" "$(field "$data" RAM)" "$(field "$data" LOAD)" "$ok" "$total"
+      "$(field "$data" DISK)" "$(field "$data" RAM)" "$(field "$data" LOAD)" "$ok" "$total" "$lvls"
   done 3< <(grep -vE '^\s*(#|$)' "$INV")
 }
 
@@ -181,7 +230,8 @@ do_maintain() {
     echo "-- 1. apt update / upgrade / autoremove"
     ssh "${SSH_OPTS[@]}" "$target" 'bash -s' <<< "$(remote_maint)" 2>&1 | sed 's/^/   /'
 
-    echo "-- 2. graceful node stop + reboot"
+    echo "-- 2. units -> *:INFO, graceful node stop + reboot"
+    ssh "${SSH_OPTS[@]}" "$target" 'bash -s' <<< "$(remote_fix_units)" 2>&1 | sed 's/^/   /'
     ssh "${SSH_OPTS[@]}" "$target" 'bash -s' <<< "$(remote_stop_reboot)" 2>&1 | sed 's/^/   /'
 
     echo "-- 3. waiting for return"
@@ -202,6 +252,71 @@ do_maintain() {
   done 3< <(grep -vE '^\s*(#|$)' "$INV")
 }
 
+tgt_of() { grep -vE '^\s*(#|$)' "$INV" | awk -v n="$1" '$1==n{print $2; exit}'; }
+
+node_status() { # node_status <host> <port> -> shard syncing gap nonce
+  ssh "${SSH_OPTS[@]}" -n "$(tgt_of "$1")" "curl -s --max-time 5 localhost:$2/node/status" 2>/dev/null |
+    jq -r '.data.metrics | "\(.erd_shard_id) \(.erd_is_syncing) \((.erd_probable_highest_nonce//0)-(.erd_nonce//0)) \(.erd_nonce//0)"' 2>/dev/null
+}
+
+node_healthy() { # node_healthy <host> <port> [<ref host> <ref port>]: synced, and near the reference
+  local s sy gap nonce rs rsy rgap rnonce d
+  read -r s sy gap nonce <<< "$(node_status "$1" "$2")"
+  [ "${sy:-1}" = 0 ] && [ "${gap:-999}" -le 5 ] 2>/dev/null || return 1
+  [ -z "${3:-}" ] && return 0
+  read -r rs rsy rgap rnonce <<< "$(node_status "$3" "$4")"
+  [ -n "${rnonce:-}" ] || return 1
+  d=$(( rnonce - nonce )); [ ${d#-} -le 10 ]
+}
+
+do_loglevel() {
+  local name target rows="" line
+  echo "-- 1. unit files -> *:INFO (applies at each node's next restart)"
+  while read -r name target _ <&3; do
+    [ -z "${name:-}" ] && continue; case "$name" in \#*) continue;; esac
+    local out; out=$(ssh "${SSH_OPTS[@]}" "$target" 'bash -s' <<< "$(remote_fix_units)" 2>&1 | tr '\n' ' ')
+    printf "   %-20s %s\n" "$name" "${out:-already *:INFO}"
+    while IFS= read -r line; do rows+="$name|$line"$'\n'
+    done < <(ssh "${SSH_OPTS[@]}" "$target" 'bash -s' <<< "$(remote_levels)" 2>/dev/null | grep '^LVL|')
+  done 3< <(grep -vE '^\s*(#|$)' "$INV")
+
+  # rows: host|LVL|n|port|level|keys|shard|syncing|gap|nonce
+  echo "-- 2. restart nodes still running another level, one at a time"
+  local todo; todo=$(printf '%s' "$rows" | awk -F'|' '$5!="*:INFO" && $5!="stopped"')
+  if [ -z "$todo" ]; then echo "   none — every running node is at *:INFO"; return 0; fi
+
+  local n port lvl keys shard ref signer h p
+  while IFS='|' read -r name _ n port lvl keys shard _ <&4; do
+    echo "   ${CYN}$name node-$n${NC} shard=$shard level=$lvl managed-keys=$keys"
+    # reference for "synced": any node in the same shard on another machine
+    ref=$(printf '%s' "$rows" | awk -F'|' -v h="$name" -v s="$shard" '$1!=h && $7==s {print $1" "$4; exit}')
+    # a multikey node may only go down while another machine signs for the same shard
+    if [ "${keys:-0}" -gt 0 ]; then
+      signer=""
+      while read -r h p; do
+        [ -n "$h" ] && node_healthy "$h" "$p" && { signer="$h:$p"; break; }
+      done < <(printf '%s' "$rows" | awk -F'|' -v h="$name" -v s="$shard" '$1!=h && $7==s && $6>0 {print $1" "$4}')
+      if [ -z "$signer" ]; then
+        echo "   ${RED}no healthy redundant signer for shard $shard elsewhere — NOT restarting; do it by hand in a quiet window${NC}"
+        return 1
+      fi
+      echo "   redundant signer healthy: $signer"
+    fi
+    ssh "${SSH_OPTS[@]}" -n "$(tgt_of "$name")" "sudo -n systemctl restart elrond-node-$n" \
+      || { echo "   ${RED}restart failed — stopping${NC}"; return 1; }
+    local start ok=0; start=$(date +%s); sleep 45
+    while [ $(( $(date +%s) - start )) -lt 900 ]; do
+      # shellcheck disable=SC2086
+      if node_healthy "$name" "$port" $ref; then ok=$((ok+1)); [ $ok -ge 2 ] && break; else ok=0; fi
+      sleep 15
+    done
+    if [ $ok -lt 2 ]; then echo "   ${RED}not back in sync after 900 s — stopping${NC}"; return 1; fi
+    lvl=$(ssh "${SSH_OPTS[@]}" -n "$(tgt_of "$name")" \
+      "tr '\0' ' ' < /proc/\$(systemctl show -p MainPID --value elrond-node-$n)/cmdline | grep -oE -- '-log-level [^ ]+'")
+    echo "   ${GRN}synced after $(( $(date +%s) - start ))s, running ${lvl:-?}${NC}"
+  done 4<<< "$todo"
+}
+
 # ------------------------------------------------------------------------ main
 
 ACTION=${1:-survey}
@@ -212,5 +327,6 @@ case "$ACTION" in
   survey)   do_survey ;;
   report)   do_report ;;
   maintain) do_maintain ;;
-  *) die "unknown action '$ACTION' (want: survey | report | maintain)" ;;
+  loglevel) do_loglevel ;;
+  *) die "unknown action '$ACTION' (want: survey | report | maintain | loglevel)" ;;
 esac

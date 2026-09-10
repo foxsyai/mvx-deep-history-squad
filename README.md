@@ -529,6 +529,23 @@ observing-squad     deploy@203.0.113.9  4
   before backups. Upgrade multikey hosts with **option 5, `upgrade_multikey`** — the scripts
   map it straight to `upgrade_squad`; plain `upgrade` skips re-enabling `DbLookupExtensions`.
 
+- **Every node runs `-log-level *:INFO`, never DEBUG.** mx-chain-scripts' unit template
+  hard-codes `-log-level *:DEBUG` (`config/functions.cfg`, the `systemd` function). Since
+  Supernova that is ~14,000 lines/min per node against ~100 at INFO. On a 4-node squad the
+  4 GB journal then holds about an hour, so yesterday's incident is already gone. On a
+  power-capped NUC, journald alone took 12 % of a core. In September 2026 six of seven
+  machines were at DEBUG. Upgrades (`upgrade`, `upgrade_multikey`, `upgrade_squad`) and
+  `github_pull` leave the unit files alone. `install`, `add_node`, `observers` and
+  `multikey` regenerate them at DEBUG. After any of those:
+
+  ```bash
+  ./scripts/mvx-fleet-maint.sh loglevel   # fix units; restart only non-INFO nodes, one at a time
+  ```
+
+  It restarts a multikey node only while another machine is healthy and signing for the
+  same shard, and does nothing when every node is already at INFO. `maintain` fixes the
+  units before its reboot; `survey` and `report` show each node's level and flag DEBUG.
+
 - **Never reboot a node that is mid trie-sync.** You throw away hours of shard-state sync
   for a reboot that can wait. Check `journalctl -u elrond-node-1 | grep "trie sync"` and
   let it finish first.
@@ -541,11 +558,11 @@ observing-squad     deploy@203.0.113.9  4
 
 ### 8.4 The report
 
-`report` emits a markdown table — disk free, RAM, load, and how many nodes are healthy:
+`report` emits a markdown table — disk free, RAM, load, how many nodes are healthy, and their log level:
 
-| machine | os | kernel | uptime | disk free | ram | cpu load | nodes ok |
-|---|---|---|---|---|---|---|---|
-| do-sh0 | Ubuntu 22.04.5 LTS | 5.15.0-191 | 1 minute | 50G free / 97G (49% used) | 1.0Gi / 7.8Gi | 0.84 0.36 0.13 | 1/1 |
+| machine | os | kernel | uptime | disk free | ram | cpu load | nodes ok | log level |
+|---|---|---|---|---|---|---|---|---|
+| do-sh0 | Ubuntu 22.04.5 LTS | 5.15.0-191 | 1 minute | 50G free / 97G (49% used) | 1.0Gi / 7.8Gi | 0.84 0.36 0.13 | 1/1 | *:INFO |
 
 Watch the trend, not the snapshot: disk is the one that ends squads. See §5 — the
 deep-history box grows at ~17.6 GB per epoch and a full disk stops the nodes. DigitalOcean's
