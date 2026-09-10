@@ -401,6 +401,38 @@ sudo systemctl reset-failed plymouth-quit-wait.service
 > rather than retrying, or you will fight the lock and risk a half-configured system. Run
 > long upgrades detached in the first place: `setsid nohup ... > ~/upgrade.log 2>&1 &`.
 
+**Box hard-resets during an upgrade, with nothing in the logs.** Suspect heat before
+power. A software crash always leaves a trace; a hardware thermal cutoff (THERMTRIP) cuts
+power with no chance to log, so the journal just *stops*. A 12-thread `go build` is the
+heaviest load a node box ever sees, which is why upgrades — and only upgrades — trigger it.
+
+```bash
+cat /sys/devices/system/cpu/cpu0/thermal_throttle/package_throttle_count   # climbing at idle = bad
+for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type) $(( $(cat $z/temp)/1000 ))C"; done
+```
+
+On two NUC10i7FNH boxes (15 W i7-10710U) the tells were 63-100 C at *idle* and thousands of
+throttle events. Cleaning the fan and fins fixed idle temperature; a 4-thread load still
+spiked to 91 C in 8 s — dried thermal paste.
+
+**Cap power, not frequency.** `scripts/mvx-thermal-cap.sh` holds the package to a fixed
+RAPL budget with turbo allowed, and sets the burst limit equal to the sustained one (the
+stock 64 W bursts are what cause the spikes). The obvious alternative, `no_turbo=1`, pins
+this CPU to its 1.1 GHz base clock: fine for 6 s rounds, but after Supernova (600 ms
+rounds, 10x the blocks) it left both 12-core boxes at 96-99 % CPU and a multikey backup's
+metachain falling behind. At 12 W with turbo: 1.5-2.4 GHz, plateau 61-72 C, and that
+metachain went from 379 blocks behind to caught up in three minutes.
+
+```bash
+sudo install -m 755 scripts/mvx-thermal-cap.sh /usr/local/sbin/
+printf "WATTS=12\nSAFE_WATTS=8\nHOT_C=88\n" | sudo tee /etc/default/mvx-thermal-cap
+# mvx-thermal-cap.service runs `apply` at boot (RAPL limits reset every boot);
+# mvx-thermal-watch.timer runs `watch` every 30 s and drops to SAFE_WATTS if HOT_C is hit
+```
+
+Find the budget empirically: run it for several minutes under real load and read the
+plateau, not the first reading — thermal equilibrium on a NUC takes about a minute.
+
 **Node is at `epoch = 0` and crawling.** It is replaying from genesis. Check:
 
 ```bash
