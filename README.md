@@ -477,14 +477,25 @@ observing-squad     deploy@203.0.113.9  4
 - **Do the machines one at a time**, or in small independent batches, and confirm each is
   back and synced before moving on. If one fails to return, stop the pass and investigate
   before rebooting anything else.
-- **Check whether a node is actually in the consensus set before rebooting it.** A staked,
-  eligible validator loses rating for downtime; a pure observer loses nothing. The node's
-  own `erd_peer_type` is not sufficient — confirm against the network:
+- **Know whether a node signs before you restart it — and don't trust the obvious check.**
+  A validator loses rating for downtime; a pure observer loses nothing. Neither
+  `erd_peer_type` nor `erd_public_key_block_sign` answers this for a **multikey** node: in
+  multikey mode the node's own key is a throwaway, and it signs for the BLS keys in
+  `config/allValidatorsKeys.pem`. Checking the node's own key against
+  `/validator/statistics` reports "not a validator" for a host signing for 80 live keys —
+  that exact mistake was made here in September 2026. Look at the files instead:
 
   ```bash
-  KEY=$(curl -s localhost:8080/node/status | jq -r .data.metrics.erd_public_key_block_sign)
-  curl -s localhost:8079/validator/statistics | jq --arg k "$KEY" '.data.statistics[$k] // "not in validator set"'
+  grep -c "BEGIN PRIVATE KEY" ~/elrond-nodes/node-0/config/allValidatorsKeys.pem  # managed keys
+  grep RedundancyLevel ~/elrond-nodes/node-0/config/prefs.toml                   # 0 main, 1+ backup
   ```
+
+- **Multikey main/backup pairs: never down together.** A backup (`RedundancyLevel >= 1`)
+  signs only while the main is silent. Upgrade or reboot all mains first, confirm each is
+  *committing blocks* again (not merely `active` — a node needs ~20 s to rejoin consensus),
+  and only then touch the backup. `maintain` walks the inventory top to bottom, so list mains
+  before backups. Upgrade multikey hosts with **option 5, `upgrade_multikey`** — the scripts
+  map it straight to `upgrade_squad`; plain `upgrade` skips re-enabling `DbLookupExtensions`.
 
 - **Never reboot a node that is mid trie-sync.** You throw away hours of shard-state sync
   for a reboot that can wait. Check `journalctl -u elrond-node-1 | grep "trie sync"` and

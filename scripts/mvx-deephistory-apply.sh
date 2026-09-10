@@ -133,12 +133,20 @@ for n in $NODES; do
     # node is actually doing, instead of claiming a retention window it does not have.
     set_kv "$CFG" "ObserverCleanOldEpochsData"       "false"
     set_kv "$CFG" "AccountsTrieCleanOldEpochsData"   "false"
+    # historical-balances forces ACCOUNTS state retention but leaves PEER state
+    # pruning on. On 2026-09-09 that deadlocked the metachain node: after a restart
+    # it needed a validator-accounts root it had already pruned, no peer still had
+    # it, and `syncValidatorAccountsState` retried every 2 min with zero progress
+    # until forced to start from the network. Upgrades reset this to the stock
+    # `true`, so it has to be enforced here, not set by hand once.
+    set_kv "$CFG" "PeerStatePruningEnabled"          "false"
     # NumEpochsToKeep is inert in this mode; left at its value purely as a marker of
     # the window you intend to return to after a re-bootstrap.
     set_kv "$CFG" "NumEpochsToKeep"                  "$NUM_EPOCHS_TO_KEEP"
   else
     set_kv "$CFG" "ObserverCleanOldEpochsData"       "true"
     set_kv "$CFG" "AccountsTrieCleanOldEpochsData"   "true"
+    set_kv "$CFG" "PeerStatePruningEnabled"          "true"    # stock
     set_kv "$CFG" "NumEpochsToKeep"                  "$NUM_EPOCHS_TO_KEEP"
   fi
   # Empty pattern => no epoch is exempt from trie removal. Stock "%50" would keep
