@@ -546,6 +546,18 @@ observing-squad     deploy@203.0.113.9  4
   same shard, and does nothing when every node is already at INFO. `maintain` fixes the
   units before its reboot; `survey` and `report` show each node's level and flag DEBUG.
 
+  The journal's 4 GB cap is not the whole story. Ubuntu's rsyslog also copies every line
+  into `/var/log/syslog`, which rotates only weekly and has no size cap. At DEBUG that
+  reached 18–20 GB a week on the 4-node machines, and 45 GB of `/var/log` in total. After
+  fixing the level, reclaim it with a forced rotation. It needs a root-owned config with
+  the global `su` line, or logrotate refuses:
+
+  ```bash
+  g=/tmp/lr-rsyslog-only.conf
+  { grep -vE '^\s*include' /etc/logrotate.conf; echo 'include /etc/logrotate.d/rsyslog'; } | sudo tee $g >/dev/null
+  sudo nice -n 19 ionice -c3 logrotate -f $g; sudo rm -f $g   # compresses last week's file
+  ```
+
 - **Never reboot a node that is mid trie-sync.** You throw away hours of shard-state sync
   for a reboot that can wait. Check `journalctl -u elrond-node-1 | grep "trie sync"` and
   let it finish first.
@@ -680,6 +692,23 @@ forever about damage that cannot be repaired.
 
 `capture` removes node health from the critical path for reporting: the month's data lands
 on disk as each epoch starts, so an incident costs operations time rather than data.
+
+Calibration lessons from the first week, all built into the script:
+
+- **A slow answer is not a missing one.** After Supernova, listing the pool's ~65k keys at
+  a past block took 51 s. The 15 s cap turned that into a daily "history damaged" alarm
+  while history was intact. Historical calls now get `SLOW_TIMEOUT` (180 s), and the read
+  check targets `CAPTURE_SC`, the ~4k-key contract the monthly job actually reads (~1 s).
+- **An empty answer is a failure.** A price query whose dependency epoch is missing
+  returns `returnData: null` with no error, and the job would record price 0. `verify`,
+  `capture` and `floor` treat empty `returnData` as failed.
+- **Alert on gaps, not on the syncing flag.** At 600 ms rounds `erd_is_syncing` flickers on
+  healthy nodes, and a one-minute home internet drop raises it on every node at once. A
+  gap above `GAP_LIMIT` alerts immediately. The flag alone must persist across two runs
+  (10 min), which still catches a node stuck restarting.
+- **An edge-triggered alert hides a long failure.** `verify` messages only on a change,
+  so a check red since yesterday was silent today. The daily `report` now carries the
+  current history-check state.
 
 Config in `~/.mvx-guard.conf` (mode `600` — it holds a bot token). Alerts are
 edge-triggered: one message when something breaks, one when it recovers. Install as timers:

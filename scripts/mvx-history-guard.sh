@@ -43,6 +43,10 @@ CONF="${MVX_GUARD_CONF:-$HOME/.mvx-guard.conf}"
 PROXY_URL="${PROXY_URL:-http://localhost:8079}"
 PROBE_EPOCHS_BACK="${PROBE_EPOCHS_BACK:-30}"
 GAP_LIMIT="${GAP_LIMIT:-50}"
+# Historical queries are slow and get slower with load: after Supernova a full key
+# listing of the xExchange pool (~65k keys) takes ~50 s. A 15 s cap turned that into a
+# daily false "history damaged" alarm, so historical calls get their own timeout.
+SLOW_TIMEOUT="${SLOW_TIMEOUT:-180}"
 STATE_DIR="${STATE_DIR:-$HOME/.mvx-guard-state}"
 CAPTURE_DIR="${CAPTURE_DIR:-$HOME/mvx-captures}"
 mkdir -p "$STATE_DIR"
@@ -69,6 +73,16 @@ notify() { # notify <key> <ok|bad> <message>
 }
 
 api() { curl -s --max-time 15 "$@" 2>/dev/null; }
+api_slow() { curl -s --max-time "$SLOW_TIMEOUT" "$@" 2>/dev/null; }
+
+# A historical call is good only if it returned data. An empty returnData with no error
+# is what a query gives when an epoch it depends on is missing, and the staking job
+# silently records it as price 0, so it must count as a failure here.
+VM_OK='if ((.error//"")!="") then "ERR:"+(.error|.[0:90])
+       elif ((.data.data.returnData[0]//"")=="") then "ERR:empty returnData"
+       else "ok" end'
+KEYS_OK='if ((.error//"")!="") then "ERR:"+(.error|.[0:90])
+         elif (.data.pairs == null) then "ERR:no pairs" else "ok" end'
 
 # ---------------------------------------------------------------------- watch
 
@@ -84,10 +98,20 @@ do_watch() {
     syncing=$(echo "$r"| jq -r '.data.metrics.erd_is_syncing // 1')
     local gap=$((high - nonce))
     [ "$gap" -lt 0 ] && gap=0
-    if [ "$syncing" != "0" ] || [ "$gap" -gt "$GAP_LIMIT" ]; then
+    # At 600 ms rounds erd_is_syncing flickers on healthy nodes, and a one-minute
+    # internet drop sets it on every node at once. A real gap alerts at once; the flag
+    # alone must still be up at the next run (5 min later). A single flagged run with a
+    # small gap decides nothing, so it neither alerts nor declares recovery.
+    local sf="$STATE_DIR/syncing-$host_label-$p" streak=0
+    if [ "$syncing" != "0" ]; then
+      streak=$(( $(cat "$sf" 2>/dev/null || echo 0) + 1 )); echo "$streak" > "$sf"
+    else
+      rm -f "$sf"
+    fi
+    if [ "$gap" -gt "$GAP_LIMIT" ] || [ "$streak" -ge 2 ]; then
       notify "watch-$host_label-$p" bad "$host_label :$p shard=$shard behind (gap=$gap syncing=$syncing)"
       bad=1
-    else
+    elif [ "$streak" -eq 0 ]; then
       notify "watch-$host_label-$p" ok "$host_label :$p shard=$shard synced"
     fi
   done
@@ -137,9 +161,12 @@ do_verify() {
     return 1
   fi
 
-  # 1. historical account read — needs the main accounts trie
-  local acc
-  acc=$(api "$PROXY_URL/address/${PROBE_SC:-}/keys?blockNonce=$nonce" | jq -r 'if ((.error//"")!="") then "ERR:"+.error else "ok" end')
+  # 1. historical account read — needs the main accounts trie. Read the contract the
+  #    monthly job reads (CAPTURE_SC, ~4k keys, ~1 s). Listing the pool's ~65k keys
+  #    proves nothing extra and takes ~50 s under Supernova load.
+  local acc rsc="${CAPTURE_SC:-${PROBE_SC:-}}"
+  acc=$(api_slow "$PROXY_URL/address/$rsc/keys?blockNonce=$nonce" | jq -r "$KEYS_OK" 2>/dev/null)
+  [ -z "$acc" ] && acc="ERR:no answer within ${SLOW_TIMEOUT}s"
 
   # 2. historical CONTRACT EXECUTION — needs the SC storage trie.
   #    This is the check that would have caught 2026-09-07; a balance read alone
@@ -148,9 +175,10 @@ do_verify() {
   if [ -n "${PROBE_SC:-}" ] && [ -n "${PROBE_FUNC:-}" ]; then
     local args_json="[]"
     [ -n "${PROBE_ARGS:-}" ] && args_json=$(printf '%s' "$PROBE_ARGS" | jq -R 'split(",")')
-    vm=$(api "$PROXY_URL/vm-values/query?blockNonce=$nonce" -H 'Content-Type: application/json' \
+    vm=$(api_slow "$PROXY_URL/vm-values/query?blockNonce=$nonce" -H 'Content-Type: application/json' \
          -d "{\"scAddress\":\"$PROBE_SC\",\"funcName\":\"$PROBE_FUNC\",\"args\":$args_json}" \
-         | jq -r 'if ((.error//"")!="") then "ERR:"+(.error|.[0:90]) else "ok" end')
+         | jq -r "$VM_OK" 2>/dev/null)
+    [ -z "$vm" ] && vm="ERR:no answer within ${SLOW_TIMEOUT}s"
   fi
 
   if [ "$vm" != ok ] && [ "$vm" != skipped ]; then
@@ -182,16 +210,16 @@ do_capture() {
   out="$CAPTURE_DIR/$(date -u +%Y.%m)"; mkdir -p "$out"
   local ok=1
   if [ -n "${CAPTURE_SC:-}" ]; then
-    api "$PROXY_URL/address/$CAPTURE_SC/keys?blockNonce=$nonce" > "$out/staking_${cur}.json"
+    api_slow "$PROXY_URL/address/$CAPTURE_SC/keys?blockNonce=$nonce" > "$out/staking_${cur}.json"
     jq -e '.data.pairs' "$out/staking_${cur}.json" >/dev/null 2>&1 || ok=0
   fi
   if [ -n "${PROBE_SC:-}" ] && [ -n "${PROBE_FUNC:-}" ]; then
     local args_json="[]"
     [ -n "${PROBE_ARGS:-}" ] && args_json=$(printf '%s' "$PROBE_ARGS" | jq -R 'split(",")')
-    api "$PROXY_URL/vm-values/query?blockNonce=$nonce" -H 'Content-Type: application/json' \
+    api_slow "$PROXY_URL/vm-values/query?blockNonce=$nonce" -H 'Content-Type: application/json' \
       -d "{\"scAddress\":\"$PROBE_SC\",\"funcName\":\"$PROBE_FUNC\",\"args\":$args_json}" \
       > "$out/price_${cur}.json"
-    jq -e '.data.data.returnData' "$out/price_${cur}.json" >/dev/null 2>&1 || ok=0
+    jq -e '.data.data.returnData[0] // empty' "$out/price_${cur}.json" >/dev/null 2>&1 || ok=0
   fi
   if [ "$ok" = 1 ]; then
     notify capture ok "captured epoch $cur to $out"
@@ -230,13 +258,15 @@ do_floor() {
       printf "%-8s %-12s %-10s %-8s %s\n" "$e" "-" "MISSING" "-" "-"; continue
     fi
     rec=ok
-    rd=$(api "$PROXY_URL/address/${PROBE_SC:-}/keys?blockNonce=$n" | jq -r 'if ((.error//"")!="") then "FAIL" else "ok" end')
+    rd=$(api_slow "$PROXY_URL/address/${CAPTURE_SC:-${PROBE_SC:-}}/keys?blockNonce=$n" | jq -r "$KEYS_OK" 2>/dev/null)
+    [ "$rd" = ok ] || rd=FAIL
     ex="n/a"
     if [ -n "${EXEC_SC:-}" ] && [ -n "${EXEC_FUNC:-}" ]; then
       local aj="[]"; [ -n "${EXEC_ARGS:-}" ] && aj=$(printf '%s' "$EXEC_ARGS" | jq -R 'split(",")')
-      ex=$(api "$PROXY_URL/vm-values/query?blockNonce=$n" -H 'Content-Type: application/json' \
+      ex=$(api_slow "$PROXY_URL/vm-values/query?blockNonce=$n" -H 'Content-Type: application/json' \
            -d "{\"scAddress\":\"$EXEC_SC\",\"funcName\":\"$EXEC_FUNC\",\"args\":$aj}" \
-           | jq -r 'if ((.error//"")!="") then "FAIL" else "ok" end')
+           | jq -r "$VM_OK" 2>/dev/null)
+      [ "$ex" = ok ] || ex=FAIL
     fi
     [ "$rd" = ok ] && [ -z "$first_read" ] && first_read=$e
     [ "$ex" = ok ] && [ -z "$first_exec" ] && first_exec=$e
@@ -302,8 +332,17 @@ do_report() {
   fi
   [ -n "$drift" ] && bad=1
 
+  # verify alerts only when its state changes, so a check that has been red since
+  # yesterday is otherwise invisible here. Put its current state in the heartbeat.
+  local hist="not run yet" vf="$STATE_DIR/verify"
+  if [ -f "$vf" ]; then
+    if [ "$(cat "$vf")" = ok ]; then hist="ok"
+    else hist="FAILING since $(date -u -r "$vf" '+%Y-%m-%d %H:%MZ')"; bad=1; fi
+  fi
+
   local head="✅ mvx daily report"; [ "$bad" = 1 ] && head="⚠️ mvx daily report (attention)"
   local text="$head — $(hostname -s)$lines
+  history check: $hist
   window: $win
   disk: $disk${drift}"
   log "$text"
