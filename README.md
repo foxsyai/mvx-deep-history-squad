@@ -823,7 +823,9 @@ that is the metachain's `PeerAccountsTrie`, rewritten every block and never prun
 after a restart (2026-09-09). At that rate a 4 TB disk holds ~23 epochs. Neither the
 staking read nor the price query touches that store; they read `AccountsTrie`. So
 `mvx-epoch-prune.sh` has a second step that keeps validator statistics only for the
-newest `PEER_KEEP` epochs (default 3, the node's `NumActivePersisters`). That brings an
+newest `PEER_KEEP` epochs. The default of 4 (the current epoch plus three behind it) is what a
+stock node keeps with `NumEpochsToKeep = 4`; below the node's `NumActivePersisters` (3) it is
+refused. That brings an
 epoch to ~25 GB, and the same disk to ~120 epochs.
 
 | setting (in `~/.mvx-guard.conf`) | meaning |

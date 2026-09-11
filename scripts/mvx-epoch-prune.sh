@@ -44,7 +44,9 @@
 # after Supernova it is ~122 GB of a ~147 GB epoch. The staking and price queries never
 # read it (they use AccountsTrie), and the node only opens its last NumActivePersisters
 # epochs. So the second step removes Epoch_N/Shard_metachain/PeerAccountsTrie for all but
-# the newest PEER_KEEP epochs, which takes an epoch from ~147 GB to ~25 GB.
+# the newest PEER_KEEP epochs, which takes an epoch from ~147 GB to ~25 GB. The default of 4
+# (the current epoch plus three behind it) is exactly what a stock node keeps on disk with
+# NumEpochsToKeep = 4: at epoch 2234 it keeps 2231..2234, and 2231 goes when 2235 starts.
 #
 #   PEER_TRIM=off      do nothing (default)
 #   PEER_TRIM=report   log what would be removed, delete nothing
@@ -68,7 +70,7 @@ MAX_DELETE="${MAX_DELETE:-10}"
 NODES_ROOT="${NODES_ROOT:-$HOME/elrond-nodes}"
 STATUS_PORT="${STATUS_PORT:-8083}"     # metachain: authoritative for epoch number
 PEER_TRIM="${PEER_TRIM:-off}"          # off | report | on
-PEER_KEEP="${PEER_KEEP:-3}"            # newest epochs whose validator statistics stay
+PEER_KEEP="${PEER_KEEP:-4}"            # current + 3 behind it, like a stock node (NumEpochsToKeep=4)
 PEER_MAX_DELETE="${PEER_MAX_DELETE:-5}"
 DRY=0; FORCE=0
 
