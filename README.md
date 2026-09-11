@@ -816,6 +816,37 @@ Done this way on 2026-09-11, it caught the N−1 dependency above at step 3, wit
 lost. The kept run is 2230 (a dependency only) + 2231 onward, because 2228–2230 are the
 outage gap and a run broken by a gap is no use to a monthly job.
 
+**After Supernova, 83 % of the growth is metachain validator statistics.** Measured over
+the first Supernova night, a historical-balances epoch comes to ~147 GB. About 122 GB of
+that is the metachain's `PeerAccountsTrie`, rewritten every block and never pruned here:
+`PeerStatePruningEnabled` must stay `false`, since with it on the metachain deadlocked
+after a restart (2026-09-09). At that rate a 4 TB disk holds ~23 epochs. Neither the
+staking read nor the price query touches that store; they read `AccountsTrie`. So
+`mvx-epoch-prune.sh` has a second step that keeps validator statistics only for the
+newest `PEER_KEEP` epochs (default 3, the node's `NumActivePersisters`). That brings an
+epoch to ~25 GB, and the same disk to ~120 epochs.
+
+| setting (in `~/.mvx-guard.conf`) | meaning |
+|---|---|
+| `PEER_TRIM=off` | default — step 2 does nothing |
+| `PEER_TRIM=report` | log what would be removed; delete nothing |
+| `PEER_TRIM=on` | remove `Epoch_N/Shard_metachain/PeerAccountsTrie` for N < current − PEER_KEEP + 1 |
+
+Refused below `NumActivePersisters`, capped at `PEER_MAX_DELETE` (5) epochs per run, skipped
+whenever step 1 refuses, and it never touches any other store. Switch to `on` only after
+the staged test passes:
+
+```bash
+./mvx-peer-trim-test.sh baseline      # staking keys + price, FIRST_EPOCH..current
+./mvx-peer-trim-test.sh move 2231     # refused if the node still has that epoch open
+./mvx-peer-trim-test.sh compare       # must print "all answers identical"
+./mvx-peer-trim-test.sh restart       # metachain node must boot from disk and resync
+./mvx-peer-trim-test.sh compare
+# ...after the next epoch change:
+./mvx-peer-trim-test.sh compare && ./mvx-peer-trim-test.sh finish   # then PEER_TRIM=on
+# any mismatch: ./mvx-peer-trim-test.sh restore
+```
+
 At every restart in this mode each node logs `WARN could not retrieve snapshot info — key
 not found`. It appeared at every restart since 2026-09-09, before any epoch was moved, and
 does not trigger a state re-sync. It is routine, not a symptom.
