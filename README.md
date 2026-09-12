@@ -850,7 +850,10 @@ the staged test passes:
 ```
 
 At every restart in this mode each node logs `WARN could not retrieve snapshot info — key
-not found`. It appeared at every restart since 2026-09-09, before any epoch was moved, and
+not found`. Just before that warning, the metachain node scans back through every epoch of its
+configured window (`NumEpochsToKeep`, 62 here) and creates an empty ~72 KB
+`PeerAccountsTrie` folder wherever one is missing, including trimmed epochs. It finds
+nothing, before or after trimming, and the folders are harmless. It appeared at every restart since 2026-09-09, before any epoch was moved, and
 does not trigger a state re-sync. It is routine, not a symptom.
 
 ### 9.4 Order of defence
