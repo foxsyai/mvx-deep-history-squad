@@ -319,7 +319,7 @@ do_report() {
   # the retention window away at the next epoch boundary. So check the settings
   # every day and say so, rather than trusting anyone to remember.
   local drift="" cfg="$HOME/elrond-nodes/node-0/config/config.toml"
-  local want_hb="${HISTORICAL_BALANCES_EXPECTED:-1}" keep="${NUM_EPOCHS_EXPECTED:-62}"
+  local want_hb="${HISTORICAL_BALANCES_EXPECTED:-1}" keep="${NUM_EPOCHS_EXPECTED:-63}"
   if [ -f "$cfg" ]; then
     local k; k=$(grep -hE "^\s*NumEpochsToKeep = " "$cfg" | head -1 | tr -dc '0-9')
     [ -n "$k" ] && [ "$k" != "$keep" ] && drift="$drift"$'\n'"  ⚠ NumEpochsToKeep=$k (expected $keep)"

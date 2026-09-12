@@ -53,7 +53,7 @@ It comes from a single setting:
 [StoragePruning]
     ObserverCleanOldEpochsData     = true
     AccountsTrieCleanOldEpochsData = true
-    NumEpochsToKeep                = 62     # ≈ 60 usable epochs / days
+    NumEpochsToKeep                = 63     # two 31-day months + 1 (see §9.3a)
 ```
 
 This is exactly how the public gateway serves 3 epochs of deep history — it just ships
@@ -133,11 +133,11 @@ chmod +x ~/mvx-deephistory-apply.sh
 ### 3.3 What happens next
 
 Each node fast-bootstraps to the current epoch — minutes for metachain, up to ~3 h for
-shard 1 (largest state) — then retains state forward within the 62-epoch window.
+shard 1 (largest state) — then retains state forward within the 63-epoch window.
 **No archive downloads, no import-db, no two-phase seeding.**
 
 Deep history is queryable from roughly the moment each node finishes bootstrapping, and the
-window then grows until it hits 62 epochs and starts rolling.
+window then grows until it hits 63 epochs and starts rolling.
 
 > The MultiversX docs push you toward downloading daily archives. Those URLs are **not
 > public** — `url_base = "https://..."` is redacted and you must request access via
@@ -231,7 +231,7 @@ What it enforces, per node:
 | `AccountsStatePruningEnabled` | `false` | **the** deep-history switch |
 | `ObserverCleanOldEpochsData` | `true` | let the node delete old epoch DBs |
 | `AccountsTrieCleanOldEpochsData` | `true` | let the node delete old trie data |
-| `NumEpochsToKeep` | `62` | ≈60 usable epochs |
+| `NumEpochsToKeep` | `63` | a monthly job run as late as the last day of a 31-day month still reaches the whole previous 31-day month, plus the epoch its first price reads (§9.3a) |
 | `AccountsTrieSkipRemovalCustomPattern` | `""` | stock `"%50"` keeps every 50th epoch **forever**, defeating the storage ceiling |
 | `DbLookupExtensions.Enabled` | `true` | tx/block lookup by hash |
 | systemd `-log-level` | `*:INFO` | DEBUG dumps full SC payloads — 382 KB per 40 lines |
@@ -278,6 +278,31 @@ and under-called 62 epochs by ~400 GB).
 
 Empty epoch dirs are ~372 KB — the pruning storer pre-creates the whole window on start,
 which is normal and harmless.
+
+### 5.1 After Supernova, in historical-balances mode (measured)
+
+Epoch 2234 (2026-09-11/12), the first full Supernova epoch, 600 ms rounds:
+
+| Node | Shard | Per epoch |
+|---|---|---|
+| node-0 | 0 | 4.35 GB |
+| node-1 | 1 | 12.22 GB |
+| node-2 | 2 | 3.90 GB |
+| node-3 | metachain | **127.3 GB**, of which 126.7 GB validator statistics |
+| | **total** | **147.8 GB / epoch**; **21.1 GB** without validator statistics |
+
+The shards barely changed with ten times the blocks (+2–10 %). State follows transactions,
+not blocks. The metachain's validator-statistics trie is rewritten every block, and this
+mode cannot prune it in place (§9.3a). On a 4 TB disk:
+
+| Retention | Untrimmed | With the validator-statistics trim (4 epochs kept) |
+|---|---|---|
+| 34 epochs | ~5.0 TB — does not fit | ~1.2 TB |
+| **63 epochs** | ~9.3 TB — does not fit | **~1.8 TB** |
+| most that fits (10 % free) | ~23 | ~140 |
+
+Stock nodes, which prune normally, are unaffected: a Supernova epoch there is ~21 GB
+across all four shards, the metachain 0.7 GB.
 
 These are *rolling* figures: nothing is pruned until the window fills, so the first real
 pruning event is `NumEpochsToKeep` days after install. Verify it plateaus then, rather
@@ -745,8 +770,8 @@ The objection to `historical-balances` in §2 is storage, not correctness: it fo
 `scripts/mvx-epoch-prune.sh` puts the ceiling back from outside the node:
 
 ```bash
-./mvx-epoch-prune.sh --keep 62 --dry-run    # show exactly what would go
-./mvx-epoch-prune.sh --keep 62              # keep the newest 62 epochs
+./mvx-epoch-prune.sh --keep 63 --dry-run    # show exactly what would go
+./mvx-epoch-prune.sh --keep 63              # keep the newest 63 epochs
 ```
 
 **Why deleting epoch directories is safe here.** `[StateTriesConfig] SnapshotsEnabled = true`
@@ -797,7 +822,10 @@ numbers always matched. The consequence for storage is that **the price for epoc
 epoch N−1's directory**. Proven on 2026-09-11: with `Epoch_2230` moved away, 2231's staking
 read still worked but its price came back empty. Restoring 2230 fixed it. So a window of
 K epochs serves the full job for K−1 of them. For "a calendar month, run in the first three
-days of the next", keep 34, not 33.
+days of the next", keep 34, not 33. This box keeps **63** so the job can run on *any* day of
+the following month. The worst case is the last day of a 31-day month for a 31-day previous
+month: from the previous month's first epoch to that day is 62 epochs, plus the one its
+first price reads.
 
 **Trimming older epochs by hand: move aside, verify, then delete.** Deleting history is
 irreversible, and on this mode a node that cannot start from its own disk replays from
@@ -851,7 +879,7 @@ the staged test passes:
 
 At every restart in this mode each node logs `WARN could not retrieve snapshot info — key
 not found`. Just before that warning, the metachain node scans back through every epoch of its
-configured window (`NumEpochsToKeep`, 62 here) and creates an empty ~72 KB
+configured window (`NumEpochsToKeep`, 63 here) and creates an empty ~72 KB
 `PeerAccountsTrie` folder wherever one is missing, including trimmed epochs. It finds
 nothing, before or after trimming, and the folders are harmless. It appeared at every restart since 2026-09-09, before any epoch was moved, and
 does not trigger a state re-sync. It is routine, not a symptom.

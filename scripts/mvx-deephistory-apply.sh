@@ -23,7 +23,7 @@
 #  without a full re-sync.
 #
 #  Usage:  ./mvx-deephistory-apply.sh [--restart]
-#  Env:    NUM_EPOCHS_TO_KEEP (default 62)   TRIE_DEADLINE_MS (default 100000)
+#  Env:    NUM_EPOCHS_TO_KEEP (default 63)   TRIE_DEADLINE_MS (default 100000)
 #          NODE_DISPLAY_NAME (explorer name; lost on every upgrade)
 #  Settings are remembered in ~/.mvx-deephistory.conf after the first run, so a
 #  post-upgrade invocation needs no arguments.
@@ -47,7 +47,7 @@ if [ -f "$CONF" ]; then
   [ -n "$_e_hist" ] && HISTORICAL_BALANCES="$_e_hist"
 fi
 
-NUM_EPOCHS_TO_KEEP="${NUM_EPOCHS_TO_KEEP:-62}"
+NUM_EPOCHS_TO_KEEP="${NUM_EPOCHS_TO_KEEP:-63}"
 TRIE_DEADLINE_MS="${TRIE_DEADLINE_MS:-100000}"
 NODE_DISPLAY_NAME="${NODE_DISPLAY_NAME:-}"
 # HISTORICAL_BALANCES=1 switches this squad from "retention" mode to "full archive"

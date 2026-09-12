@@ -64,7 +64,7 @@ set -uo pipefail
 CONF="${MVX_GUARD_CONF:-$HOME/.mvx-guard.conf}"
 [ -f "$CONF" ] && . "$CONF"
 
-KEEP="${KEEP:-62}"
+KEEP="${KEEP:-63}"                    # two 31-day months + the epoch the first price reads
 MIN_KEEP="${MIN_KEEP:-5}"
 MAX_DELETE="${MAX_DELETE:-10}"
 NODES_ROOT="${NODES_ROOT:-$HOME/elrond-nodes}"
